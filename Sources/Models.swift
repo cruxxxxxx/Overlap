@@ -39,15 +39,28 @@ struct VennGroup: Identifiable, Equatable {
 /// required in all of them, excluded from all of them, or mixed.
 enum RegionRole { case required, excluded, mixed }
 
-/// Stable tag colors from the top-level prefix (a whole group shares a hue).
+/// Stable tag colors.
 enum TagPalette {
     static let colors: [Color] =
         [.blue, .purple, .pink, .orange, .green, .teal, .indigo, .mint, .red, .cyan]
+
+    private static func hash(_ s: String) -> Int {
+        var h = 5381
+        for u in s.unicodeScalars { h = ((h << 5) &+ h) &+ Int(u.value) }
+        return abs(h)
+    }
+
+    /// Grouped hue: keyed by the top-level prefix (all `cat/…` share a color).
+    /// Used where tags from many groups mix (map, chips).
     static func color(for path: String) -> Color {
         let key = path.split(separator: "/").first.map(String.init) ?? path
-        var h = 5381
-        for u in key.unicodeScalars { h = ((h << 5) &+ h) &+ Int(u.value) }
-        return colors[abs(h) % colors.count]
+        return colors[hash(key) % colors.count]
+    }
+
+    /// Distinct hue per full tag — used inside a Venn diagram, where telling
+    /// the circles apart matters more than family grouping.
+    static func setColor(for path: String) -> Color {
+        colors[hash(path) % colors.count]
     }
 }
 

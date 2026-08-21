@@ -8,8 +8,15 @@ struct ExploreView: View {
     @EnvironmentObject var store: TagStore
     @State private var browse: [String] = []   // drill path within the co-occur tree
     @State private var vennZoom: [UUID: CGFloat] = [:]
-    @State private var vennHeight: CGFloat = 190
-    @State private var heightAtDragStart: CGFloat = 190
+    @State private var stackHeight: CGFloat = 260
+    @State private var stackAtDragStart: CGFloat = 260
+    @State private var expandedGroupID: UUID?
+
+    /// Per-diagram render height: share the diagram area, grow with the split.
+    private var diagramHeight: CGFloat {
+        let n = CGFloat(max(1, store.groups.count))
+        return max(150, (stackHeight - 40) / n - 60)
+    }
 
     private var allSets: [String] { store.querySets }
 
@@ -32,23 +39,68 @@ struct ExploreView: View {
     private var currentLevel: [TagNode] { level(browse) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if store.groups.contains(where: { !$0.sets.isEmpty }) || store.groups.count > 1 {
-                diagramStack
+        GeometryReader { geo in
+            let hasDiagrams = store.groups.contains(where: { !$0.sets.isEmpty }) || store.groups.count > 1
+            VStack(spacing: 0) {
+                if hasDiagrams {
+                    // The split is a real divider: drag it all the way down and
+                    // the diagram area takes the whole sidebar, map collapses.
+                    diagramStack
+                        .frame(height: min(stackHeight, max(120, geo.size.height - 34)))
+                    resizeHandle
+                    Divider()
+                }
+                browseHeader
                 Divider()
+                TagMapView(
+                    nodes: currentLevel,
+                    emptyMessage: allSets.isEmpty
+                        ? "Nothing here"
+                        : "No other tags co-occur with the current results — any circle added now would match 0 images.\nTry Any mode or paint a wider region on a diagram above.",
+                    onDrill: { browse.append($0) },
+                    onLeaf: { store.include($0) })
+                    .background(Color(nsColor: .underPageBackgroundColor))
+                    .frame(maxHeight: .infinity)
             }
-            browseHeader
-            Divider()
-            TagMapView(
-                nodes: currentLevel,
-                emptyMessage: allSets.isEmpty
-                    ? "Nothing here"
-                    : "No other tags co-occur with the current results — any circle added now would match 0 images.\nTry Any mode or paint a wider region on a diagram above.",
-                onDrill: { browse.append($0) },
-                onLeaf: { store.include($0) })
-                .background(Color(nsColor: .underPageBackgroundColor))
         }
         .onChange(of: allSets) { _ in browse = [] }   // reset drill when the query changes
+        .sheet(item: Binding(
+            get: { expandedGroupID.flatMap { id in store.groups.first { $0.id == id } } },
+            set: { expandedGroupID = $0?.id })) { group in
+            expandedDiagram(group)
+        }
+    }
+
+    /// The diagram, big: a near-fullscreen sheet with full zoom/pan room.
+    private func expandedDiagram(_ group: VennGroup) -> some View {
+        let d = store.vennData(group.sets)
+        let screen = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1400, height: 900)
+        let w = screen.width * 0.85
+        let h = screen.height * 0.88
+        return VStack(spacing: 0) {
+            HStack {
+                Text("Diagram \((store.groups.firstIndex { $0.id == group.id } ?? 0) + 1)")
+                    .font(.headline)
+                Text("\(store.results.count) matching")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if !group.regions.isEmpty {
+                    Button("Clear regions") { store.clearRegions(group: group.id) }
+                }
+                Button("Done") { expandedGroupID = nil }.keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+            Divider()
+            VennView(tags: group.sets, totals: d.totals, regions: d.regions,
+                     selectedRegions: group.regions,
+                     onToggleRegion: { store.toggleRegion(group: group.id, mask: $0) },
+                     onRemoveTag: { store.clear($0) },
+                     onExcludeTag: { store.exclude($0) },
+                     zoom: zoomBinding(group.id),
+                     height: h - 110)
+            regionChips(group, regions: d.regions)
+        }
+        .frame(width: w, height: h)
     }
 
     // MARK: Diagram stack
@@ -71,8 +123,6 @@ struct ExploreView: View {
                 .help("A new diagram ANDs with the others")
             }
         }
-        .frame(maxHeight: vennHeight * CGFloat(min(store.groups.count, 2)) + 60)
-        .overlay(alignment: .bottom) { resizeHandle }
     }
 
     private func diagramCard(_ group: VennGroup, index: Int) -> some View {
@@ -97,6 +147,13 @@ struct ExploreView: View {
                     .help("Click to toggle AND/OR with the previous diagram")
                 }
                 Spacer()
+                if !group.sets.isEmpty {
+                    Button { expandedGroupID = group.id } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption2)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help("Expand this diagram")
+                }
                 if !group.regions.isEmpty {
                     Button { store.clearRegions(group: group.id) } label: {
                         Image(systemName: "paintbrush").font(.caption2)
@@ -123,8 +180,10 @@ struct ExploreView: View {
                 VennView(tags: group.sets, totals: d.totals, regions: d.regions,
                          selectedRegions: group.regions,
                          onToggleRegion: { store.toggleRegion(group: group.id, mask: $0) },
+                         onRemoveTag: { store.clear($0) },
+                         onExcludeTag: { store.exclude($0) },
                          zoom: zoomBinding(group.id),
-                         height: vennHeight)
+                         height: diagramHeight)
                 regionChips(group, regions: d.regions)
             }
         }
@@ -182,9 +241,9 @@ struct ExploreView: View {
             .contentShape(Rectangle())
             .gesture(DragGesture()
                 .onChanged { v in
-                    vennHeight = min(max(heightAtDragStart + v.translation.height, 120), 700)
+                    stackHeight = min(max(stackAtDragStart + v.translation.height, 120), 2000)
                 }
-                .onEnded { _ in heightAtDragStart = vennHeight })
+                .onEnded { _ in stackAtDragStart = stackHeight })
             .onHover { inside in
                 if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
             }

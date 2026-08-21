@@ -9,25 +9,25 @@ struct VennView: View {
     let regions: [Int: Int]            // bitmask -> count
     var selectedRegions: Set<Int> = []
     var onToggleRegion: (Int) -> Void = { _ in }
+    var onRemoveTag: (String) -> Void = { _ in }
+    var onExcludeTag: (String) -> Void = { _ in }
     @Binding var zoom: CGFloat
     var height: CGFloat = 180
 
     @GestureState private var pinch: CGFloat = 1
     @State private var hoverMask: Int = 0
     @State private var hovering = false
+    @State private var pan: CGSize = .zero
+    @State private var panAtDragStart: CGSize = .zero
     private var scale: CGFloat { min(max(zoom * pinch, 1), 5) }
 
     var body: some View {
         GeometryReader { geo in
             let k = tags.count
             let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
-            let base = min(geo.size.width, geo.size.height) * 0.27
-            let maxTotal = CGFloat(max(1, totals.prefix(k).max() ?? 1))
-            let radii: [CGFloat] = (0..<k).map { i in
-                base * (0.62 + 0.38 * sqrt(CGFloat(totals[i]) / maxTotal))
-            }
-            let centers = Self.dataAwareCenters(
-                k: k, center: c, r: base, radii: radii, totals: totals, regions: regions)
+            let (centers, radii) = Self.layout(
+                k: k, tags: tags, totals: totals, regions: regions,
+                canvas: geo.size, center: c)
 
             ZStack {
                 // fills: painted regions (strong) + hovered region (soft)
@@ -57,19 +57,31 @@ struct VennView: View {
                 ForEach(0..<k, id: \.self) { i in
                     let inHover = hoverMask & (1 << i) != 0 && (regions[hoverMask] ?? 0) > 0
                     Circle()
-                        .fill(TagPalette.color(for: tags[i]).opacity(0.22))
+                        .fill(TagPalette.setColor(for: tags[i]).opacity(0.22))
                         .overlay(Circle().stroke(
-                            TagPalette.color(for: tags[i]).opacity(inHover ? 1 : 0.75),
+                            TagPalette.setColor(for: tags[i]).opacity(inHover ? 1 : 0.75),
                             lineWidth: inHover ? 2.5 : 1.5))
                         .frame(width: radii[i] * 2, height: radii[i] * 2)
+                        .contentShape(Circle())
+                        .contextMenu {
+                            Text(tags[i])
+                            Divider()
+                            Button("Remove from Diagram") { onRemoveTag(tags[i]) }
+                            Button("Exclude (NOT)") { onExcludeTag(tags[i]) }
+                        }
                         .position(centers[i])
                         .blendMode(.multiply)
                         .transition(.scale.combined(with: .opacity))
                 }
 
-                // counts (visual; the whole surface is the hit target)
+                // counts, placed at each region's deepest interior point;
+                // regions too skinny to label honestly get no pill (still
+                // clickable, and always listed in the chips row)
+                let poles = Self.regionPoles(k: k, centers: centers, radii: radii, regions: regions)
                 ForEach(Array(regions.keys.sorted()), id: \.self) { mask in
-                    if let cnt = regions[mask], cnt > 0 {
+                    if let cnt = regions[mask], cnt > 0,
+                       let pole = poles[mask],
+                       pole.depth > 9 || selectedRegions.contains(mask) || mask == hoverMask {
                         let on = selectedRegions.contains(mask)
                         Text("\(cnt)")
                             .font(.caption).bold().monospacedDigit()
@@ -77,20 +89,23 @@ struct VennView: View {
                             .padding(.horizontal, 5).padding(.vertical, 1)
                             .background(on ? AnyShapeStyle(Color.accentColor.opacity(0.9))
                                           : AnyShapeStyle(.regularMaterial), in: Capsule())
-                            .position(Self.regionPoint(mask: mask, centers: centers, radii: radii, global: c, k: k))
+                            .position(pole.point)
                             .allowsHitTesting(false)
                     }
                 }
+                // set labels, inside their own circle, pushed away from neighbors
                 ForEach(0..<k, id: \.self) { i in
                     Text(tags[i].split(separator: "/").last.map(String.init) ?? tags[i])
-                        .font(.caption2).bold()
-                        .foregroundStyle(TagPalette.color(for: tags[i]))
-                        .position(Self.outLabel(i: i, k: k, center: c, centers: centers, radius: radii[i]))
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(TagPalette.setColor(for: tags[i]))
+                        .shadow(color: .black.opacity(0.6), radius: 2)
+                        .position(Self.labelAnchor(i: i, k: k, centers: centers, radii: radii))
                         .allowsHitTesting(false)
                 }
             }
             .animation(.spring(response: 0.45, dampingFraction: 0.7), value: k)
             .scaleEffect(scale, anchor: .center)
+            .offset(pan)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
             .onContinuousHover { phase in
@@ -103,13 +118,27 @@ struct VennView: View {
                     hoverMask = 0
                 }
             }
-            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local).onEnded { v in
-                let mask = maskAt(v.location, centers: centers, radii: radii, c: c, k: k)
-                if mask != 0, (regions[mask] ?? 0) > 0 { onToggleRegion(mask) }
-            })
+            // One gesture, two meanings: a still click toggles the region
+            // under the cursor; a real drag pans the zoomed diagram.
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                .onChanged { v in
+                    guard scale > 1.01 else { return }
+                    pan = CGSize(width: panAtDragStart.width + v.translation.width,
+                                 height: panAtDragStart.height + v.translation.height)
+                }
+                .onEnded { v in
+                    let moved = hypot(v.translation.width, v.translation.height)
+                    panAtDragStart = pan
+                    guard moved < 4 else { return }   // it was a pan, not a click
+                    let mask = maskAt(v.location, centers: centers, radii: radii, c: c, k: k)
+                    if mask != 0, (regions[mask] ?? 0) > 0 { onToggleRegion(mask) }
+                })
             .simultaneousGesture(MagnificationGesture()
                 .updating($pinch) { v, s, _ in s = v }
                 .onEnded { v in zoom = min(max(zoom * v, 1), 5) })
+            .onChange(of: zoom) { z in
+                if z <= 1.01 { pan = .zero; panAtDragStart = .zero }
+            }
             .overlay(alignment: .topTrailing) { zoomControls }
         }
         .frame(height: height)
@@ -117,10 +146,11 @@ struct VennView: View {
     }
 
     /// Which region (membership mask) sits under a point, inverse-mapped
-    /// through the zoom.
+    /// through the zoom and pan.
     private func maskAt(_ p: CGPoint, centers: [CGPoint], radii: [CGFloat],
                         c: CGPoint, k: Int) -> Int {
-        let q = CGPoint(x: (p.x - c.x) / scale + c.x, y: (p.y - c.y) / scale + c.y)
+        let q = CGPoint(x: (p.x - pan.width - c.x) / scale + c.x,
+                        y: (p.y - pan.height - c.y) / scale + c.y)
         var mask = 0
         for i in 0..<k where hypot(q.x - centers[i].x, q.y - centers[i].y) <= radii[i] {
             mask |= (1 << i)
@@ -151,89 +181,135 @@ struct VennView: View {
         Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
     }
 
-    /// Data-aware layout for two sets: nest a subset inside its container,
-    /// separate disjoint sets, and scale partial overlaps by the real
-    /// intersection. 3+ sets keep the fixed layout (general Euler layouts are
-    /// impossible; empty regions there simply show no count pill).
-    static func dataAwareCenters(k: Int, center c: CGPoint, r: CGFloat,
-                                 radii: [CGFloat], totals: [Int],
-                                 regions: [Int: Int]) -> [CGPoint] {
-        guard k == 2 else { return centers(k: k, center: c, r: r) }
-        let aOnly = regions[0b01] ?? 0
-        let bOnly = regions[0b10] ?? 0
-        let both = regions[0b11] ?? 0
-        let rA = radii[0], rB = radii[1]
+    /// Data-driven Euler-ish layout. Every pair gets a target distance from
+    /// its REAL overlap — disjoint pairs spread apart, subsets nest, partial
+    /// overlaps sink together proportionally — then a deterministic spring
+    /// relaxation settles the circles and the result is fitted to the canvas.
+    /// Circles stay circles; the geometry just tells the truth about the data.
+    static func layout(k: Int, tags: [String], totals: [Int], regions: [Int: Int],
+                       canvas: CGSize, center c: CGPoint) -> ([CGPoint], [CGFloat]) {
+        let base = min(canvas.width, canvas.height) * 0.27
+        let maxTotal = CGFloat(max(1, totals.prefix(k).max() ?? 1))
+        var radii: [CGFloat] = (0..<k).map { i in
+            base * (0.5 + 0.5 * sqrt(CGFloat(totals[i]) / maxTotal))
+        }
+        guard k > 1 else { return ([c], radii) }
 
-        if both == 0 {
-            // disjoint: side by side, no overlap
-            let gap: CGFloat = 12
-            return [CGPoint(x: c.x - rA - gap / 2, y: c.y),
-                    CGPoint(x: c.x + rB + gap / 2, y: c.y)]
-        }
-        if aOnly == 0 && both > 0 {
-            // A ⊂ B: nest A inside B, tucked toward one side
-            let off = max(0, rB - rA - 6)
-            return [CGPoint(x: c.x + off * 0.6, y: c.y), c]
-        }
-        if bOnly == 0 && both > 0 {
-            // B ⊂ A: nest B inside A
-            let off = max(0, rA - rB - 6)
-            return [c, CGPoint(x: c.x + off * 0.6, y: c.y)]
-        }
-        // partial overlap: center distance scales with how much they share —
-        // f=0 barely touching, f=1 as deep as containment allows
-        let f = CGFloat(both) / CGFloat(max(1, min(totals[0], totals[1])))
-        let dMax = rA + rB - 8            // barely overlapping
-        let dMin = abs(rA - rB) + 10      // deepest sensible overlap
-        let d = dMax - sqrt(f) * (dMax - dMin)
-        return [CGPoint(x: c.x - d / 2, y: c.y), CGPoint(x: c.x + d / 2, y: c.y)]
-    }
-
-    private static func centers(k: Int, center c: CGPoint, r: CGFloat) -> [CGPoint] {
-        switch k {
-        case 1: return [c]
-        case 2: return [CGPoint(x: c.x - r * 0.55, y: c.y), CGPoint(x: c.x + r * 0.55, y: c.y)]
-        case 3: return [
-            CGPoint(x: c.x, y: c.y - r * 0.55),
-            CGPoint(x: c.x - r * 0.6, y: c.y + r * 0.45),
-            CGPoint(x: c.x + r * 0.6, y: c.y + r * 0.45),
-        ]
-        default:
-            // 4+: evenly spaced on a ring, all overlapping the center (an
-            // Euler-style layout — true Venns don't extend past 3 circles).
-            let rr = r * 0.55
-            return (0..<k).map { i in
-                let a = Double(i) / Double(k) * 2 * .pi - .pi / 2
-                return CGPoint(x: c.x + CGFloat(cos(a)) * rr, y: c.y + CGFloat(sin(a)) * rr)
+        // pairwise shared counts + subset detection from the region data
+        var pair = [[Int]](repeating: [Int](repeating: 0, count: k), count: k)
+        var withTag = [Int](repeating: 0, count: k)
+        for (mask, cnt) in regions {
+            for i in 0..<k where mask & (1 << i) != 0 {
+                withTag[i] += cnt
+                for j in (i + 1)..<k where mask & (1 << j) != 0 {
+                    pair[i][j] += cnt; pair[j][i] += cnt
+                }
             }
         }
-    }
 
-    private static func regionPoint(mask: Int, centers: [CGPoint], radii: [CGFloat],
-                                    global: CGPoint, k: Int) -> CGPoint {
-        let bits = (0..<k).filter { mask & (1 << $0) != 0 }
-        if bits.count == 1 {
-            let ci = centers[bits[0]]
-            let dx = ci.x - global.x, dy = ci.y - global.y
-            let len = max(1, sqrt(dx * dx + dy * dy))
-            let push = radii[bits[0]] * (k == 1 ? 0 : 0.42)
-            return CGPoint(x: ci.x + dx / len * push, y: ci.y + dy / len * push)
+        func targetDistance(_ i: Int, _ j: Int) -> CGFloat {
+            let shared = pair[i][j]
+            let ri = radii[i], rj = radii[j]
+            if shared == 0 { return ri + rj + base * 0.9 }           // disjoint: real air
+            if shared == withTag[i] || shared == withTag[j] {        // subset: nest
+                return abs(ri - rj) * 0.5
+            }
+            let f = CGFloat(shared) / CGFloat(max(1, min(withTag[i], withTag[j])))
+            // weak overlaps stay shallow — only meaningful shares sink deep
+            let dMax = ri + rj + base * 0.15
+            let dMin = abs(ri - rj) + 10
+            return dMax - pow(f, 0.4) * (dMax - dMin)
         }
-        var sx: CGFloat = 0, sy: CGFloat = 0
-        for i in bits { sx += centers[i].x; sy += centers[i].y }
-        let mid = CGPoint(x: sx / CGFloat(bits.count), y: sy / CGFloat(bits.count))
-        let pull: CGFloat = bits.count == k ? 0 : 0.25
-        return CGPoint(x: mid.x + (global.x - mid.x) * pull, y: mid.y + (global.y - mid.y) * pull)
+
+        // deterministic ring start, then spring relaxation toward targets
+        var pos: [CGPoint] = (0..<k).map { i in
+            let a = Double(i) / Double(k) * 2 * .pi - .pi / 2
+            return CGPoint(x: c.x + CGFloat(cos(a)) * base * 0.6,
+                           y: c.y + CGFloat(sin(a)) * base * 0.6)
+        }
+        var step: CGFloat = 0.25
+        for _ in 0..<220 {
+            for i in 0..<k {
+                for j in (i + 1)..<k {
+                    let dx = pos[j].x - pos[i].x, dy = pos[j].y - pos[i].y
+                    var d = sqrt(dx * dx + dy * dy)
+                    if d < 0.01 { d = 0.01 }
+                    let err = (d - targetDistance(i, j)) * step / 2
+                    let ux = dx / d, uy = dy / d
+                    pos[i].x += ux * err; pos[i].y += uy * err
+                    pos[j].x -= ux * err; pos[j].y -= uy * err
+                }
+            }
+            step *= 0.985
+        }
+
+        // fit the settled layout into the canvas (scale positions AND radii)
+        var minX = CGFloat.greatestFiniteMagnitude, maxX = -CGFloat.greatestFiniteMagnitude
+        var minY = CGFloat.greatestFiniteMagnitude, maxY = -CGFloat.greatestFiniteMagnitude
+        for i in 0..<k {
+            minX = min(minX, pos[i].x - radii[i]); maxX = max(maxX, pos[i].x + radii[i])
+            minY = min(minY, pos[i].y - radii[i]); maxY = max(maxY, pos[i].y + radii[i])
+        }
+        let pad: CGFloat = 26   // room for outside labels
+        let scale = min(2.4, min((canvas.width - pad * 2) / max(maxX - minX, 1),
+                                 (canvas.height - pad * 2) / max(maxY - minY, 1)))
+        let mid = CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)
+        let centers = pos.map { p in
+            CGPoint(x: c.x + (p.x - mid.x) * scale, y: c.y + (p.y - mid.y) * scale)
+        }
+        radii = radii.map { $0 * scale }
+        return (centers, radii)
     }
 
-    private static func outLabel(i: Int, k: Int, center c: CGPoint, centers: [CGPoint], radius: CGFloat) -> CGPoint {
-        let ctr = centers[i]
-        let dx = ctr.x - c.x, dy = ctr.y - c.y
+    /// For every non-empty region, the deepest interior point ("pole") — the
+    /// spot farthest from all boundaries while inside every in-circle and
+    /// outside every out-circle. Found by grid sampling; exact enough for
+    /// labels and cheap (a few thousand distance checks).
+    static func regionPoles(k: Int, centers: [CGPoint], radii: [CGFloat],
+                            regions: [Int: Int]) -> [Int: (point: CGPoint, depth: CGFloat)] {
+        var out: [Int: (point: CGPoint, depth: CGFloat)] = [:]
+        for (mask, cnt) in regions where cnt > 0 {
+            let inBits = (0..<k).filter { mask & (1 << $0) != 0 }
+            let outBits = (0..<k).filter { mask & (1 << $0) == 0 }
+            guard let smallest = inBits.min(by: { radii[$0] < radii[$1] }) else { continue }
+
+            // the region must live inside its smallest in-circle — sample there
+            let cs = centers[smallest], rs = radii[smallest]
+            var best: (point: CGPoint, depth: CGFloat)?
+            let steps = 17
+            for gy in 0..<steps {
+                for gx in 0..<steps {
+                    let p = CGPoint(
+                        x: cs.x - rs + rs * 2 * CGFloat(gx) / CGFloat(steps - 1),
+                        y: cs.y - rs + rs * 2 * CGFloat(gy) / CGFloat(steps - 1))
+                    // depth = distance to the nearest constraint boundary
+                    var depth = CGFloat.greatestFiniteMagnitude
+                    for i in inBits {
+                        depth = min(depth, radii[i] - hypot(p.x - centers[i].x, p.y - centers[i].y))
+                    }
+                    for j in outBits {
+                        depth = min(depth, hypot(p.x - centers[j].x, p.y - centers[j].y) - radii[j])
+                    }
+                    if depth > (best?.depth ?? 0) { best = (p, depth) }
+                }
+            }
+            if let best, best.depth > 0 { out[mask] = best }
+        }
+        return out
+    }
+
+    /// A set's label sits inside its own circle, pushed away from the crowd
+    /// of neighboring circles so it clearly belongs to its ring.
+    static func labelAnchor(i: Int, k: Int, centers: [CGPoint], radii: [CGFloat]) -> CGPoint {
+        let ci = centers[i]
+        guard k > 1 else { return CGPoint(x: ci.x, y: ci.y - radii[i] * 0.55) }
+        var ax: CGFloat = 0, ay: CGFloat = 0
+        for j in 0..<k where j != i { ax += centers[j].x; ay += centers[j].y }
+        ax /= CGFloat(k - 1); ay /= CGFloat(k - 1)
+        var dx = ci.x - ax, dy = ci.y - ay
         let len = sqrt(dx * dx + dy * dy)
-        if k == 1 || len < 4 {
-            // centered (single set, or a nested container) — label above
-            return CGPoint(x: ctr.x, y: ctr.y - radius - 10)
-        }
-        return CGPoint(x: ctr.x + dx / len * (radius + 12), y: ctr.y + dy / len * (radius + 12))
+        if len < 1 { dx = 0; dy = -1 } else { dx /= len; dy /= len }
+        // just inside the rim, on the side facing away from the neighbors
+        return CGPoint(x: ci.x + dx * radii[i] * 0.72, y: ci.y + dy * radii[i] * 0.72)
     }
 }

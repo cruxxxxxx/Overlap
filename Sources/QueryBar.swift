@@ -142,8 +142,10 @@ struct QueryBar: View {
             Text(tag).font(.caption)
                 .strikethrough(role == .excluded)
             Button { store.clear(tag) } label: {
-                Image(systemName: "xmark").font(.system(size: 7, weight: .bold))
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
                     .foregroundStyle(.secondary)
+                    .frame(width: 16, height: 16)      // generous hit target
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Remove from query")
@@ -152,7 +154,14 @@ struct QueryBar: View {
         .background(color.opacity(0.25), in: Capsule())
         .overlay(Capsule().stroke(color.opacity(0.6)))
         .onTapGesture { store.cycle(tag) }
-        .help("Click cycles include → exclude → off")
+        .contextMenu {
+            Text(tag)
+            Divider()
+            Button("Remove from Query") { store.clear(tag) }
+            Button("Exclude (NOT)") { store.exclude(tag) }
+            Button("Include") { store.include(tag) }
+        }
+        .help("Click cycles include → exclude → off · right-click for options")
     }
 }
 
