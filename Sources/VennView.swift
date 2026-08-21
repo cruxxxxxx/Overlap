@@ -14,6 +14,7 @@ struct VennView: View {
     @Binding var zoom: CGFloat
     var height: CGFloat = 180
 
+    @Environment(\.colorScheme) private var colorScheme
     @GestureState private var pinch: CGFloat = 1
     @State private var hoverMask: Int = 0
     @State private var hovering = false
@@ -54,13 +55,18 @@ struct VennView: View {
                 }
                 .allowsHitTesting(false)
 
+                // Monochrome circles: overlaps stack into brighter (dark mode)
+                // or darker (light mode) shades, so region depth reads as
+                // luminance — and the accent selection is the ONLY color.
+                let dark = colorScheme == .dark
+                let ink = dark ? Color.white : Color.black
                 ForEach(0..<k, id: \.self) { i in
                     let inHover = hoverMask & (1 << i) != 0 && (regions[hoverMask] ?? 0) > 0
                     Circle()
-                        .fill(TagPalette.setColor(for: tags[i]).opacity(0.22))
+                        .fill(ink.opacity(dark ? 0.10 : 0.06))
                         .overlay(Circle().stroke(
-                            TagPalette.setColor(for: tags[i]).opacity(inHover ? 1 : 0.75),
-                            lineWidth: inHover ? 2.5 : 1.5))
+                            inHover ? Color.accentColor : ink.opacity(0.45),
+                            lineWidth: inHover ? 2.5 : 1.2))
                         .frame(width: radii[i] * 2, height: radii[i] * 2)
                         .contentShape(Circle())
                         .contextMenu {
@@ -70,18 +76,17 @@ struct VennView: View {
                             Button("Exclude (NOT)") { onExcludeTag(tags[i]) }
                         }
                         .position(centers[i])
-                        .blendMode(.multiply)
+                        .blendMode(dark ? .screen : .multiply)
                         .transition(.scale.combined(with: .opacity))
                 }
 
-                // counts, placed at each region's deepest interior point;
-                // regions too skinny to label honestly get no pill (still
-                // clickable, and always listed in the chips row)
+                // counts are on-demand: only the hovered region and painted
+                // regions show their number (full list lives in the chips row)
                 let poles = Self.regionPoles(k: k, centers: centers, radii: radii, regions: regions)
                 ForEach(Array(regions.keys.sorted()), id: \.self) { mask in
                     if let cnt = regions[mask], cnt > 0,
                        let pole = poles[mask],
-                       pole.depth > 9 || selectedRegions.contains(mask) || mask == hoverMask {
+                       selectedRegions.contains(mask) || mask == hoverMask {
                         let on = selectedRegions.contains(mask)
                         Text("\(cnt)")
                             .font(.caption).bold().monospacedDigit()
@@ -95,10 +100,12 @@ struct VennView: View {
                 }
                 // set labels, inside their own circle, pushed away from neighbors
                 ForEach(0..<k, id: \.self) { i in
+                    let inHover = hoverMask & (1 << i) != 0 && (regions[hoverMask] ?? 0) > 0
                     Text(tags[i].split(separator: "/").last.map(String.init) ?? tags[i])
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(TagPalette.setColor(for: tags[i]))
-                        .shadow(color: .black.opacity(0.6), radius: 2)
+                        .foregroundStyle(inHover ? Color.accentColor : Color.primary.opacity(0.8))
+                        .shadow(color: colorScheme == .dark ? .black.opacity(0.6) : .white.opacity(0.6),
+                                radius: 2)
                         .position(Self.labelAnchor(i: i, k: k, centers: centers, radii: radii))
                         .allowsHitTesting(false)
                 }
