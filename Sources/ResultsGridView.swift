@@ -18,7 +18,7 @@ struct ResultsGridView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if store.mode == .queue { queueBar } else { filterBar }
+            if store.mode == .queue { queueBar } else { QueryBar(thumbSize: $thumbSize) }
             Divider()
             if store.results.isEmpty {
                 emptyState
@@ -246,84 +246,6 @@ struct ResultsGridView: View {
         }
     }
 
-    // MARK: Filter bar
-
-    private var filterBar: some View {
-        HStack(spacing: 12) {
-            Picker("", selection: Binding(
-                get: { store.matchMode },
-                set: { store.setMatchMode($0) })) {
-                Text("All").tag(MatchMode.all)
-                Text("Any").tag(MatchMode.any)
-                Text("Only").tag(MatchMode.only)
-                Text("Groups").tag(MatchMode.groups)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 240)
-            .help("All=AND · Any=OR · Only=exact · Groups=OR within a letter, AND across letters")
-
-            chips
-            Spacer()
-            Text("\(store.results.count)")
-                .font(.headline)
-                .monospacedDigit()
-            Text("files").foregroundStyle(.secondary)
-            sortMenu
-            Slider(value: $thumbSize, in: 90...280).frame(width: 120)
-            Button("Clear") { store.clearFilter() }
-                .disabled(store.activeIncludes.isEmpty && store.activeExcludes.isEmpty)
-        }
-        .padding(8)
-    }
-
-    private let groupLetters = ["A", "B", "C", "D"]
-    private let groupColors: [Color] = [.blue, .orange, .purple, .pink]
-
-    private var chips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(store.activeIncludes, id: \.self) { tag in
-                    includeChip(tag)
-                }
-                ForEach(store.activeExcludes, id: \.self) { tag in
-                    chip(tag, color: .red, symbol: "minus")
-                }
-            }
-        }
-    }
-
-    private func includeChip(_ tag: String) -> some View {
-        HStack(spacing: 3) {
-            if store.matchMode == .groups {
-                let g = store.groupOf(tag)
-                Button(groupLetters[g % 4]) { store.cycleIncludeGroup(tag) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 15, height: 15)
-                    .background(groupColors[g % 4], in: Circle())
-                    .help("Click to change OR-group")
-            }
-            Image(systemName: "plus").font(.system(size: 8, weight: .bold))
-            Text(tag).font(.caption)
-        }
-        .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(Color.green.opacity(0.25), in: Capsule())
-        .overlay(Capsule().stroke(Color.green.opacity(0.6)))
-        .onTapGesture { store.set(tag, to: .off) }
-    }
-
-    private func chip(_ tag: String, color: Color, symbol: String) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: symbol).font(.system(size: 8, weight: .bold))
-            Text(tag).font(.caption)
-        }
-        .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(color.opacity(0.25), in: Capsule())
-        .overlay(Capsule().stroke(color.opacity(0.6)))
-        .onTapGesture { store.set(tag, to: .off) }
-    }
-
     // MARK: Grid
 
     private var grid: some View {
@@ -360,38 +282,13 @@ struct ResultsGridView: View {
         max(1, Int((width - 14) / (thumbSize + 22)))
     }
 
-    private var sortMenu: some View {
-        Menu {
-            ForEach(SortKey.allCases) { key in
-                Button { store.setSortKey(key) } label: {
-                    HStack {
-                        Text(key.rawValue)
-                        if store.sortKey == key { Image(systemName: "checkmark") }
-                    }
-                }
-            }
-            Divider()
-            Button { store.setSortAscending(true) } label: {
-                HStack { Text("Ascending"); if store.sortAscending { Image(systemName: "checkmark") } }
-            }
-            Button { store.setSortAscending(false) } label: {
-                HStack { Text("Descending"); if !store.sortAscending { Image(systemName: "checkmark") } }
-            }
-        } label: {
-            Label(store.sortKey.rawValue,
-                  systemImage: store.sortAscending ? "arrow.up.arrow.down" : "arrow.down.arrow.up")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-    }
-
     private var queueBar: some View {
         HStack(spacing: 12) {
             Image(systemName: "tray.and.arrow.down")
             Text("Queue").font(.headline)
             Text("\(store.results.count) untagged").foregroundStyle(.secondary)
             Spacer()
-            sortMenu
+            SortMenu()
             Slider(value: $thumbSize, in: 90...280).frame(width: 120)
             Button { store.applyQueue() } label: {
                 Label("Apply \(store.taggedQueueCount)", systemImage: "arrow.right.circle")

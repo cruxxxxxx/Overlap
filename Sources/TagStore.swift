@@ -25,12 +25,13 @@ final class TagStore: ObservableObject {
     @Published var tagCounts: [String: Int] = [:]
     @Published var isIndexing = false
 
-    // Filter
-    @Published private(set) var tagState: [String: TriState] = [:]
-    @Published private(set) var includeGroups: [String: Int] = [:]  // tag -> OR group
+    // THE query — single source of truth for every query-building UI (filter
+    // bar, sidebar tri-state, Explore breadcrumb, Venn regions). These are all
+    // just visual methods of constructing the same query.
+    @Published private(set) var querySets: [String] = []       // ordered includes (= Venn circles, chips)
+    @Published private(set) var queryExcludes: Set<String> = []
     @Published var matchMode: MatchMode = .all
-    static let maxGroups = 4
-
+    @Published private(set) var selectedRegions: Set<Int> = []      // membership bitmasks (.regions mode)
     /// User-created tags kept in the tree even when no file carries them yet.
     @Published var knownTags: Set<String> = []
     /// Custom order for top-level tags (names). Unlisted ones fall back to A→Z.
@@ -47,9 +48,18 @@ final class TagStore: ObservableObject {
     @Published var showPreview = false {
         didSet { UserDefaults.standard.set(showPreview, forKey: "showPreview") }
     }
+    @Published var viewStyle: ViewStyle = .grid
     var columnsHint = 1
 
     func requestTagFocus() { tagFocusRequest &+= 1 }
+
+    /// Filter to a single tag and jump to the grid (used by the cluster view).
+    func focusTag(_ tag: String) {
+        clearQuery()
+        include(tag)
+        mode = .tags
+        viewStyle = .grid
+    }
 
     // Queue
     @Published var mode: LibraryMode = .tags
@@ -205,75 +215,260 @@ final class TagStore: ObservableObject {
         applyCounts(counts)
     }
 
-    // MARK: - Filter mutation
+    // MARK: - Explore (co-occurrence)
 
-    func state(for tag: String) -> TriState { tagState[tag] ?? .off }
+    /// Tags that co-occur with the current include set (AND). Counts = how many
+    /// of the current matching images also carry that tag. Linear in the subset.
+    func coOccurring() -> [(tag: String, count: Int)] {
+        let active = Set(activeIncludes)
+        let base = active.isEmpty ? allItems : results
+        var counts: [String: Int] = [:]
+        for item in base {
+            for t in item.tags where !active.contains(t) { counts[t, default: 0] += 1 }
+        }
+        return counts.sorted {
+            $0.value != $1.value ? $0.value > $1.value
+                : $0.key.localizedStandardCompare($1.key) == .orderedAscending
+        }.map { ($0.key, $0.value) }
+    }
 
-    func cycle(_ tag: String) {
-        let next = state(for: tag).next
-        if next == .off { tagState.removeValue(forKey: tag) } else { tagState[tag] = next }
-        if next != .include { includeGroups.removeValue(forKey: tag) }
-        refreshResults()
+    // MARK: - Query mutation (the only way any UI edits the query)
+
+    var activeIncludes: [String] { querySets }
+    var activeExcludes: [String] { queryExcludes.sorted() }
+
+    func state(for tag: String) -> TriState {
+        if querySets.contains(tag) { return .include }
+        if queryExcludes.contains(tag) { return .exclude }
+        return .off
+    }
+
+    /// The state the user *sees*: in Venn mode a set whose bit is off in every
+    /// painted region reads as excluded even though it's still a circle.
+    func effectiveState(for tag: String) -> TriState {
+        if regionRole(tag) == .excluded { return .exclude }
+        return state(for: tag)
+    }
+
+    /// Add a tag to the includes (a new Venn set). Order preserved.
+    func include(_ tag: String) {
+        queryExcludes.remove(tag)
+        if querySets.contains(tag) {
+            // Venn mode: re-including a region-excluded set = lift the
+            // constraint (re-split its regions) rather than a no-op.
+            if regionRole(tag) == .excluded, let i = querySets.firstIndex(of: tag) {
+                let bit = 1 << i
+                selectedRegions = Set(selectedRegions.flatMap { [$0, $0 | bit] })
+            }
+            refreshResults()
+        } else {
+            mutateSets { $0.append(tag) }
+        }
+    }
+
+    /// Exclude a tag (NOT). In Venn mode a set stays ON the diagram — its
+    /// circle remains and the painted regions are constrained to the ones
+    /// without it. Outside Venn mode it moves to the excludes list.
+    func exclude(_ tag: String) {
+        if matchMode == .regions, !selectedRegions.isEmpty,
+           let i = querySets.firstIndex(of: tag) {
+            let bit = 1 << i
+            let constrained = Set(selectedRegions.map { $0 & ~bit }).filter { $0 != 0 }
+            if !constrained.isEmpty {
+                selectedRegions = constrained
+                refreshResults()
+                return
+            }
+            // constraining left nothing — fall through to a hard exclude
+        }
+        queryExcludes.insert(tag)
+        if querySets.contains(tag) {
+            mutateSets { $0.removeAll { $0 == tag } }
+        } else {
+            refreshResults()
+        }
+    }
+
+    /// Drop a tag from the query entirely.
+    func clear(_ tag: String) {
+        queryExcludes.remove(tag)
+        if querySets.contains(tag) {
+            mutateSets { $0.removeAll { $0 == tag } }
+        } else {
+            refreshResults()
+        }
     }
 
     func set(_ tag: String, to s: TriState) {
-        if s == .off { tagState.removeValue(forKey: tag) } else { tagState[tag] = s }
-        if s != .include { includeGroups.removeValue(forKey: tag) }
+        switch s {
+        case .include: include(tag)
+        case .exclude: exclude(tag)
+        case .off: clear(tag)
+        }
+    }
+
+    /// Cycle through the states the user sees: + → − → off. Uses the
+    /// region-aware effective state so Venn-mode chips behave predictably.
+    func cycle(_ tag: String) { set(tag, to: effectiveState(for: tag).next) }
+
+    func clearQuery() {
+        querySets = []
+        queryExcludes = []
+        selectedRegions = []
+        matchMode = .all
         refreshResults()
     }
 
-    func clearFilter() { tagState.removeAll(); includeGroups.removeAll(); refreshResults() }
-    func setMatchMode(_ m: MatchMode) { matchMode = m; refreshResults() }
+    /// Keep the Venn chain to its first `count` sets (breadcrumb click).
+    func truncateSets(to count: Int) {
+        guard count < querySets.count else { return }
+        mutateSets { $0 = Array($0.prefix(count)) }
+    }
 
-    func groupOf(_ tag: String) -> Int { includeGroups[tag] ?? 0 }
-    func cycleIncludeGroup(_ tag: String) {
-        includeGroups[tag] = (groupOf(tag) + 1) % Self.maxGroups
+    func popSet() {
+        guard !querySets.isEmpty else { return }
+        mutateSets { $0.removeLast() }
+    }
+
+    /// Toggle a Venn region; painting regions switches to .regions mode.
+    func toggleRegion(_ mask: Int) {
+        if selectedRegions.contains(mask) { selectedRegions.remove(mask) }
+        else { selectedRegions.insert(mask) }
+        matchMode = .regions
         refreshResults()
     }
 
-    var activeIncludes: [String] { tagState.filter { $0.value == .include }.keys.sorted() }
-    var activeExcludes: [String] { tagState.filter { $0.value == .exclude }.keys.sorted() }
+    func clearRegions() {
+        selectedRegions = []
+        refreshResults()
+    }
 
-    // MARK: - Client-side filtering
+    func setMatchMode(_ m: MatchMode) {
+        matchMode = m
+        if m != .regions { selectedRegions = [] }
+        refreshResults()
+    }
+
+    /// In .regions mode, what the painted regions imply for this set: present
+    /// in every selected region (required), in none (effectively NOT), or mixed.
+    func regionRole(_ tag: String) -> RegionRole? {
+        guard matchMode == .regions, !selectedRegions.isEmpty,
+              let i = querySets.firstIndex(of: tag) else { return nil }
+        let bit = 1 << i
+        if selectedRegions.allSatisfy({ $0 & bit != 0 }) { return .required }
+        if selectedRegions.allSatisfy({ $0 & bit == 0 }) { return .excluded }
+        return .mixed
+    }
+
+    /// Apply a change to querySets and remap selected regions so painted
+    /// overlaps survive adding/removing sets instead of being nuked.
+    private func mutateSets(_ change: (inout [String]) -> Void) {
+        let old = querySets
+        var new = old
+        change(&new)
+        querySets = new
+        selectedRegions = Self.remapRegions(selectedRegions, from: old, to: new)
+        if selectedRegions.isEmpty && matchMode == .regions { matchMode = .all }
+        refreshResults()
+    }
+
+    /// Remap region bitmasks across a change in the ordered set list.
+    /// Appending a set splits each region into with/without the new bit;
+    /// removing a set drops its bit and compresses the higher bits.
+    static func remapRegions(_ regions: Set<Int>, from old: [String], to new: [String]) -> Set<Int> {
+        guard !regions.isEmpty else { return [] }
+        var masks = regions
+        // Removals: process old tags missing from new, highest bit first.
+        let removed = old.enumerated().filter { !new.contains($0.element) }.map(\.offset).sorted(by: >)
+        for bit in removed {
+            var next = Set<Int>()
+            for m in masks {
+                let low = m & ((1 << bit) - 1)
+                let high = (m >> (bit + 1)) << bit
+                let compressed = high | low
+                if compressed != 0 { next.insert(compressed) }
+            }
+            masks = next
+        }
+        // Additions: each surviving mask splits into with/without the new bit.
+        let survivors = old.filter { new.contains($0) }
+        let added = new.enumerated().filter { !survivors.contains($0.element) }
+        for (bit, _) in added {
+            var next = Set<Int>()
+            for m in masks {
+                // re-seat existing bits around the inserted position
+                let low = m & ((1 << bit) - 1)
+                let high = (m >> bit) << (bit + 1)
+                let seated = high | low
+                next.insert(seated)
+                next.insert(seated | (1 << bit))
+            }
+            masks = next
+        }
+        return masks
+    }
+
+    /// Region counts for the Venn: membership bitmask -> item count.
+    func vennData(_ tags: [String]) -> (totals: [Int], regions: [Int: Int]) {
+        var regions: [Int: Int] = [:]
+        for item in allItems {
+            let mask = membershipMask(of: item, over: tags)
+            if mask != 0 { regions[mask, default: 0] += 1 }
+        }
+        let totals = tags.map { tagCounts[$0] ?? 0 }
+        return (totals, regions)
+    }
+
+    // MARK: - The single evaluator
 
     private func isPrefix(_ tag: String) -> Bool {
         tagCounts[tag] == nil && tagCounts.keys.contains { $0.hasPrefix(tag + "/") }
     }
 
-    func refreshResults() {
-        let inc = activeIncludes.map { (tag: $0, prefix: isPrefix($0)) }
-        let exc = activeExcludes.map { (tag: $0, prefix: isPrefix($0)) }
-        guard !inc.isEmpty || !exc.isEmpty else { results = []; return }
-        let mode = matchMode
-        let incSet = Set(activeIncludes)
+    private func hasTag(_ item: FileItem, _ tag: String) -> Bool {
+        if item.tagSet.contains(tag) { return true }
+        return isPrefix(tag) && item.tagSet.contains { $0.hasPrefix(tag + "/") }
+    }
 
-        func has(_ t: (tag: String, prefix: Bool), _ set: Set<String>) -> Bool {
-            if set.contains(t.tag) { return true }
-            return t.prefix && set.contains { $0.hasPrefix(t.tag + "/") }
-        }
+    private func membershipMask(of item: FileItem, over tags: [String]) -> Int {
+        var mask = 0
+        for (i, t) in tags.enumerated() where hasTag(item, t) { mask |= (1 << i) }
+        return mask
+    }
+
+    /// Evaluate THE query against the catalog. Every mode is a different gate
+    /// over the same membership mask; excludes always apply.
+    func refreshResults() {
+        if mode == .queue { results = sortItems(queueItems); return }
+        let sets = querySets
+        let exc = activeExcludes
+        guard !sets.isEmpty || !exc.isEmpty else { results = []; return }
+        let gate = matchMode
+        let full = (1 << sets.count) - 1
+        let setSet = Set(sets)
+        let sel = selectedRegions
+
         let filtered = allItems.filter { item in
-            let s = item.tagSet
-            if !inc.isEmpty {
+            if !sets.isEmpty {
+                let mask = membershipMask(of: item, over: sets)
                 let ok: Bool
-                switch mode {
-                case .all:  ok = inc.allSatisfy { has($0, s) }
-                case .any:  ok = inc.contains { has($0, s) }
-                case .only: ok = (s == incSet)   // exactly these tags, nothing else
-                case .groups:
-                    // OR within each group letter, AND across groups.
-                    let grouped = Dictionary(grouping: inc) { groupOf($0.tag) }
-                    ok = grouped.values.allSatisfy { g in g.contains { has($0, s) } }
+                switch gate {
+                case .all:  ok = mask == full
+                case .any:  ok = mask != 0
+                case .only: ok = item.tagSet == setSet
+                case .regions:
+                    ok = sel.isEmpty ? mask != 0 : sel.contains(mask)
                 }
                 if !ok { return false }
             }
-            for e in exc where has(e, s) { return false }
+            for e in exc where hasTag(item, e) { return false }
             return true
         }
         results = sortItems(filtered)
     }
 
     private func refreshVisible() {
-        if mode == .tags { refreshResults() } else { results = sortItems(queueItems) }
+        refreshResults()   // refreshResults handles queue mode itself
     }
 
     // MARK: - Sorting
@@ -417,12 +612,12 @@ final class TagStore: ObservableObject {
     func deleteTagEverywhere(_ tag: String) {
         let urls = allURLs(withTag: tag)
         let wasKnown = knownTags.contains(tag)
-        guard !urls.isEmpty || wasKnown else { tagState.removeValue(forKey: tag); return }
-        let hadState = tagState[tag]
+        guard !urls.isEmpty || wasKnown else { clear(tag); return }
+        let hadState = state(for: tag)
 
         if !urls.isEmpty { lowSetTag(tag, on: urls, add: false) }
         if wasKnown { knownTags.remove(tag); saveKnownTags() }
-        tagState.removeValue(forKey: tag)
+        clear(tag)
         recomputeCounts(); refreshVisible()
 
         push("Delete “\(tag)”",
@@ -430,20 +625,29 @@ final class TagStore: ObservableObject {
                  guard let self else { return }
                  if !urls.isEmpty { self.lowSetTag(tag, on: urls, add: true) }
                  if wasKnown { self.knownTags.insert(tag); self.saveKnownTags() }
-                 if let hadState { self.tagState[tag] = hadState }
+                 if hadState != .off { self.set(tag, to: hadState) }
                  self.recomputeCounts(); self.refreshVisible()
              },
              redo: { [weak self] in
                  guard let self else { return }
                  if !urls.isEmpty { self.lowSetTag(tag, on: urls, add: false) }
                  if wasKnown { self.knownTags.remove(tag); self.saveKnownTags() }
-                 self.tagState.removeValue(forKey: tag)
+                 self.clear(tag)
                  self.recomputeCounts(); self.refreshVisible()
              })
     }
 
+    /// Carry a tag's query membership across a rename.
     private func swapState(_ from: String, _ to: String) {
-        if let s = tagState[from] { tagState.removeValue(forKey: from); tagState[to] = s }
+        let s = state(for: from)
+        guard s != .off else { return }
+        if s == .include, let idx = querySets.firstIndex(of: from) {
+            // in-place swap preserves Venn set order and region masks
+            querySets[idx] = to
+        } else {
+            clear(from)
+            set(to, to: s)
+        }
     }
 
     /// Merge one tag into another across the whole library (files with the
@@ -578,6 +782,8 @@ final class TagStore: ObservableObject {
         guard m != mode else { return }
         mode = m
         selection = []
+        // The query persists across Tags/Queue/Explore — same model everywhere.
+        if m == .explore { viewStyle = .grid }
         if m == .queue { scanQueue() } else { refreshResults() }
     }
 

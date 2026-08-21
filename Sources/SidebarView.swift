@@ -25,33 +25,37 @@ struct SidebarView: View {
             Picker("", selection: modeBinding) {
                 Text("Tags").tag(LibraryMode.tags)
                 Text("Queue").tag(LibraryMode.queue)
+                Text("Explore").tag(LibraryMode.explore)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(8)
             Divider()
 
-            if store.mode == .queue {
-                queueControls
-                Divider()
-            }
-
-            searchHeader
-            Divider()
-            List {
+            if store.mode == .explore {
+                ExploreView()
+            } else {
                 if store.mode == .queue {
-                    Text("Select images, then click a tag to apply")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                    queueControls
+                    Divider()
                 }
-                ForEach(orderedTree) { top in
-                    topNode(top)
+                searchHeader
+                Divider()
+                List {
+                    if store.mode == .queue {
+                        Text("Select images, then click a tag to apply")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    ForEach(orderedTree) { top in
+                        topNode(top)
+                    }
+                    .onMove { offsets, dest in
+                        guard search.isEmpty else { return }
+                        store.reorderTopTags(orderedTree.map(\.name), from: offsets, to: dest)
+                    }
                 }
-                .onMove { offsets, dest in
-                    guard search.isEmpty else { return }
-                    store.reorderTopTags(orderedTree.map(\.name), from: offsets, to: dest)
-                }
+                .listStyle(.sidebar)
             }
-            .listStyle(.sidebar)
         }
         .sheet(item: $renaming) { node in renameSheet(node) }
         .sheet(item: $mergingNode) { node in mergeSheet(node) }
@@ -257,7 +261,7 @@ struct TagRow: View {
     let node: TagNode
     @State private var dropTargeted = false
 
-    private var state: TriState { store.state(for: node.fullPath) }
+    private var state: TriState { store.effectiveState(for: node.fullPath) }
 
     private var dotColor: Color {
         if store.mode == .queue { return Color(nsColor: .tertiaryLabelColor) }

@@ -1,14 +1,21 @@
 import Foundation
 
 /// Which left-column mode is active.
-enum LibraryMode { case tags, queue }
+enum LibraryMode { case tags, queue, explore }
+
+/// Which detail view is shown.
+enum ViewStyle { case grid, clusters }
 
 /// How included tags are combined.
-///  - all:    item has every included tag (AND)
-///  - any:    item has at least one (OR)
-///  - only:   item's tags are exactly the included set, nothing else
-///  - groups: OR within a group letter, AND across groups
-enum MatchMode { case all, any, only, groups }
+///  - all:     item has every included tag (AND) — the default
+///  - any:     item has at least one (OR)
+///  - only:    item's tags are exactly the included set, nothing else ("Exact")
+///  - regions: item's membership bitmask is one of the painted Venn regions
+enum MatchMode { case all, any, only, regions }
+
+/// A Venn set's effective role across the selected regions (.regions mode):
+/// required in all of them, excluded from all of them, or mixed.
+enum RegionRole { case required, excluded, mixed }
 
 /// How the results grid is sorted.
 enum SortKey: String, CaseIterable, Identifiable {
