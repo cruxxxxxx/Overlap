@@ -20,10 +20,8 @@
 		A694E4E8325ADB95155DE584 /* TagVennApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCFF6E98BEB92C8D67C1AA57 /* TagVennApp.swift */; };
 		A6A879248585D4C04CBADD65 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AEBCE62FA02FC5EC1B67AB2 /* Models.swift */; };
 		B5E5AA6F8D735221DEE1FB62 /* CirclePack.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9A8AB78755ED2DF02BB4E14 /* CirclePack.swift */; };
-		BEDBFE637ED505C066610F4B /* BlobCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EFC2216C1780DCAA7411E13 /* BlobCloud.swift */; };
 		C2CFAC3A469AA8D7FB6B894D /* VennView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D25B8EFB7236A71E6C041EFD /* VennView.swift */; };
 		CBC77E06D41D7AE6F5D658D6 /* PreviewPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D9ADA837D3D06F478566746 /* PreviewPane.swift */; };
-		DF44101248DE4C11EAA43D4C /* ClusterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F38E9456057E4D0D42FC4BF /* ClusterView.swift */; };
 		DF6F35E2999C68C1E71D7F8A /* ResultsGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61C94B11BB3ECE61E43E7A3B /* ResultsGridView.swift */; };
 		E671218C0B7789CD6DC27A6E /* ThumbnailCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BE1F3AE270853C3610F2E98 /* ThumbnailCell.swift */; };
 /* End PBXBuildFile section */
@@ -31,7 +29,6 @@
 /* Begin PBXFileReference section */
 		091C0CCB4C61B59F3F5BA286 /* TagMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagMapView.swift; sourceTree = "<group>"; };
 		1070664D2D976CB763380FD8 /* QuickLookController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookController.swift; sourceTree = "<group>"; };
-		1F38E9456057E4D0D42FC4BF /* ClusterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClusterView.swift; sourceTree = "<group>"; };
 		2BE1F3AE270853C3610F2E98 /* ThumbnailCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailCell.swift; sourceTree = "<group>"; };
 		2C080DD16804757D81219018 /* TVExceptionCatcher.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TVExceptionCatcher.h; sourceTree = "<group>"; };
 		2DEC630BCFD030C9BA8AC218 /* QueryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryBar.swift; sourceTree = "<group>"; };
@@ -41,7 +38,6 @@
 		4C170BC714CBA96FB44B4E14 /* StatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsView.swift; sourceTree = "<group>"; };
 		4D9ADA837D3D06F478566746 /* PreviewPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewPane.swift; sourceTree = "<group>"; };
 		61C94B11BB3ECE61E43E7A3B /* ResultsGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResultsGridView.swift; sourceTree = "<group>"; };
-		6EFC2216C1780DCAA7411E13 /* BlobCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlobCloud.swift; sourceTree = "<group>"; };
 		865588F0094CD00F4340DA29 /* TagVenn-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "TagVenn-Bridging-Header.h"; sourceTree = "<group>"; };
 		8979AE48471A1C908344614C /* TagVenn.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TagVenn.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B9A8AB78755ED2DF02BB4E14 /* CirclePack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CirclePack.swift; sourceTree = "<group>"; };
@@ -65,9 +61,7 @@
 		79ED23B071A84DD48AFE6412 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
-				6EFC2216C1780DCAA7411E13 /* BlobCloud.swift */,
 				B9A8AB78755ED2DF02BB4E14 /* CirclePack.swift */,
-				1F38E9456057E4D0D42FC4BF /* ClusterView.swift */,
 				FD39DE5CDC4D1A4BE38464EC /* ExploreView.swift */,
 				3AEBCE62FA02FC5EC1B67AB2 /* Models.swift */,
 				4D9ADA837D3D06F478566746 /* PreviewPane.swift */,
@@ -156,9 +150,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				BEDBFE637ED505C066610F4B /* BlobCloud.swift in Sources */,
 				B5E5AA6F8D735221DEE1FB62 /* CirclePack.swift in Sources */,
-				DF44101248DE4C11EAA43D4C /* ClusterView.swift in Sources */,
 				A02B72CC5C84B73AE30FEB23 /* ExploreView.swift in Sources */,
 				A6A879248585D4C04CBADD65 /* Models.swift in Sources */,
 				CBC77E06D41D7AE6F5D658D6 /* PreviewPane.swift in Sources */,

@@ -30,11 +30,7 @@ struct ContentView: View {
             SidebarView()
                 .frame(minWidth: 240)
         } detail: {
-            if store.viewStyle == .clusters {
-                ClusterView()
-            } else {
-                ResultsGridView()
-            }
+            ResultsGridView()
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -46,15 +42,6 @@ struct ContentView: View {
                 .help("Choose the folder to search")
             }
             ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    store.viewStyle = store.viewStyle == .clusters ? .grid : .clusters
-                } label: {
-                    Label("Clusters", systemImage: store.viewStyle == .clusters
-                          ? "circle.grid.2x2.fill" : "circle.hexagongrid")
-                }
-                .help("Toggle cluster view")
-                .background(store.viewStyle == .clusters ? Color.accentColor.opacity(0.25) : .clear)
-
                 Button { showStats = true } label: {
                     Label("Stats", systemImage: "chart.bar")
                 }

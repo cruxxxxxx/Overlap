@@ -22,11 +22,12 @@ struct VennView: View {
             let k = tags.count
             let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
             let base = min(geo.size.width, geo.size.height) * 0.27
-            let centers = Self.centers(k: k, center: c, r: base)
             let maxTotal = CGFloat(max(1, totals.prefix(k).max() ?? 1))
             let radii: [CGFloat] = (0..<k).map { i in
                 base * (0.62 + 0.38 * sqrt(CGFloat(totals[i]) / maxTotal))
             }
+            let centers = Self.dataAwareCenters(
+                k: k, center: c, r: base, radii: radii, totals: totals, regions: regions)
 
             ZStack {
                 // fills: painted regions (strong) + hovered region (soft)
@@ -84,7 +85,7 @@ struct VennView: View {
                     Text(tags[i].split(separator: "/").last.map(String.init) ?? tags[i])
                         .font(.caption2).bold()
                         .foregroundStyle(TagPalette.color(for: tags[i]))
-                        .position(Self.outLabel(i: i, k: k, center: c, base: base, radius: radii[i]))
+                        .position(Self.outLabel(i: i, k: k, center: c, centers: centers, radius: radii[i]))
                         .allowsHitTesting(false)
                 }
             }
@@ -150,6 +151,44 @@ struct VennView: View {
         Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
     }
 
+    /// Data-aware layout for two sets: nest a subset inside its container,
+    /// separate disjoint sets, and scale partial overlaps by the real
+    /// intersection. 3+ sets keep the fixed layout (general Euler layouts are
+    /// impossible; empty regions there simply show no count pill).
+    static func dataAwareCenters(k: Int, center c: CGPoint, r: CGFloat,
+                                 radii: [CGFloat], totals: [Int],
+                                 regions: [Int: Int]) -> [CGPoint] {
+        guard k == 2 else { return centers(k: k, center: c, r: r) }
+        let aOnly = regions[0b01] ?? 0
+        let bOnly = regions[0b10] ?? 0
+        let both = regions[0b11] ?? 0
+        let rA = radii[0], rB = radii[1]
+
+        if both == 0 {
+            // disjoint: side by side, no overlap
+            let gap: CGFloat = 12
+            return [CGPoint(x: c.x - rA - gap / 2, y: c.y),
+                    CGPoint(x: c.x + rB + gap / 2, y: c.y)]
+        }
+        if aOnly == 0 && both > 0 {
+            // A ⊂ B: nest A inside B, tucked toward one side
+            let off = max(0, rB - rA - 6)
+            return [CGPoint(x: c.x + off * 0.6, y: c.y), c]
+        }
+        if bOnly == 0 && both > 0 {
+            // B ⊂ A: nest B inside A
+            let off = max(0, rA - rB - 6)
+            return [c, CGPoint(x: c.x + off * 0.6, y: c.y)]
+        }
+        // partial overlap: center distance scales with how much they share —
+        // f=0 barely touching, f=1 as deep as containment allows
+        let f = CGFloat(both) / CGFloat(max(1, min(totals[0], totals[1])))
+        let dMax = rA + rB - 8            // barely overlapping
+        let dMin = abs(rA - rB) + 10      // deepest sensible overlap
+        let d = dMax - sqrt(f) * (dMax - dMin)
+        return [CGPoint(x: c.x - d / 2, y: c.y), CGPoint(x: c.x + d / 2, y: c.y)]
+    }
+
     private static func centers(k: Int, center c: CGPoint, r: CGFloat) -> [CGPoint] {
         switch k {
         case 1: return [c]
@@ -187,11 +226,14 @@ struct VennView: View {
         return CGPoint(x: mid.x + (global.x - mid.x) * pull, y: mid.y + (global.y - mid.y) * pull)
     }
 
-    private static func outLabel(i: Int, k: Int, center c: CGPoint, base: CGFloat, radius: CGFloat) -> CGPoint {
-        let ctr = centers(k: k, center: c, r: base)[i]
+    private static func outLabel(i: Int, k: Int, center c: CGPoint, centers: [CGPoint], radius: CGFloat) -> CGPoint {
+        let ctr = centers[i]
         let dx = ctr.x - c.x, dy = ctr.y - c.y
-        let len = max(1, sqrt(dx * dx + dy * dy))
-        if k == 1 { return CGPoint(x: c.x, y: c.y + radius + 12) }
+        let len = sqrt(dx * dx + dy * dy)
+        if k == 1 || len < 4 {
+            // centered (single set, or a nested container) — label above
+            return CGPoint(x: ctr.x, y: ctr.y - radius - 10)
+        }
         return CGPoint(x: ctr.x + dx / len * (radius + 12), y: ctr.y + dy / len * (radius + 12))
     }
 }

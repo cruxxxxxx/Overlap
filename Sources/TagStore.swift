@@ -25,13 +25,13 @@ final class TagStore: ObservableObject {
     @Published var tagCounts: [String: Int] = [:]
     @Published var isIndexing = false
 
-    // THE query — single source of truth for every query-building UI (filter
-    // bar, sidebar tri-state, Explore breadcrumb, Venn regions). These are all
-    // just visual methods of constructing the same query.
-    @Published private(set) var querySets: [String] = []       // ordered includes (= Venn circles, chips)
+    // THE query — single source of truth for every query-building UI.
+    // One or more Venn diagrams (groups) that AND together, plus global
+    // excludes. Every surface (query bar, sidebar tri-state, diagrams, map)
+    // is a different visual method of constructing this same state.
+    @Published private(set) var groups: [VennGroup] = { [VennGroup()] }()
+    @Published private(set) var activeGroupID = UUID()
     @Published private(set) var queryExcludes: Set<String> = []
-    @Published var matchMode: MatchMode = .all
-    @Published private(set) var selectedRegions: Set<Int> = []      // membership bitmasks (.regions mode)
     /// User-created tags kept in the tree even when no file carries them yet.
     @Published var knownTags: Set<String> = []
     /// Custom order for top-level tags (names). Unlisted ones fall back to A→Z.
@@ -48,17 +48,15 @@ final class TagStore: ObservableObject {
     @Published var showPreview = false {
         didSet { UserDefaults.standard.set(showPreview, forKey: "showPreview") }
     }
-    @Published var viewStyle: ViewStyle = .grid
     var columnsHint = 1
 
     func requestTagFocus() { tagFocusRequest &+= 1 }
 
-    /// Filter to a single tag and jump to the grid (used by the cluster view).
+    /// Filter to a single tag and jump to the grid.
     func focusTag(_ tag: String) {
         clearQuery()
         include(tag)
         mode = .tags
-        viewStyle = .grid
     }
 
     // Queue
@@ -84,6 +82,7 @@ final class TagStore: ObservableObject {
 
     init(scope: URL) {
         self.scopeURL = scope
+        activeGroupID = groups[0].id
         loadQueueFolders()
         wireQueries()
         start()
@@ -221,7 +220,10 @@ final class TagStore: ObservableObject {
     /// of the current matching images also carry that tag. Linear in the subset.
     func coOccurring() -> [(tag: String, count: Int)] {
         let active = Set(activeIncludes)
-        let base = active.isEmpty ? allItems : results
+        // An empty OR diagram starts a fresh clause — its candidates come from
+        // the whole catalog, not the other diagrams' intersection.
+        let freshClause = activeGroup.sets.isEmpty && activeGroup.op == .or
+        let base = (active.isEmpty || freshClause) ? allItems : results
         var counts: [String: Int] = [:]
         for item in base {
             for t in item.tags where !active.contains(t) { counts[t, default: 0] += 1 }
@@ -234,56 +236,129 @@ final class TagStore: ObservableObject {
 
     // MARK: - Query mutation (the only way any UI edits the query)
 
+    /// Flat, ordered union of every diagram's sets (sidebar dots, co-occurrence).
+    var querySets: [String] {
+        var seen = Set<String>()
+        return groups.flatMap(\.sets).filter { seen.insert($0).inserted }
+    }
     var activeIncludes: [String] { querySets }
     var activeExcludes: [String] { queryExcludes.sorted() }
 
+    var activeGroupIndex: Int {
+        groups.firstIndex { $0.id == activeGroupID } ?? 0
+    }
+    var activeGroup: VennGroup { groups[activeGroupIndex] }
+
+    private func owningGroupIndex(of tag: String) -> Int? {
+        groups.firstIndex { $0.sets.contains(tag) }
+    }
+
     func state(for tag: String) -> TriState {
-        if querySets.contains(tag) { return .include }
+        if owningGroupIndex(of: tag) != nil { return .include }
         if queryExcludes.contains(tag) { return .exclude }
         return .off
     }
 
-    /// The state the user *sees*: in Venn mode a set whose bit is off in every
-    /// painted region reads as excluded even though it's still a circle.
+    /// The state the user *sees*: a set whose bit is off in every painted
+    /// region of its diagram reads as excluded even though it's a circle.
     func effectiveState(for tag: String) -> TriState {
         if regionRole(tag) == .excluded { return .exclude }
         return state(for: tag)
     }
 
-    /// Add a tag to the includes (a new Venn set). Order preserved.
+    /// What a diagram's painted regions imply for one of its sets.
+    func regionRole(_ tag: String) -> RegionRole? {
+        guard let gi = owningGroupIndex(of: tag) else { return nil }
+        let g = groups[gi]
+        guard !g.regions.isEmpty, let i = g.sets.firstIndex(of: tag) else { return nil }
+        let bit = 1 << i
+        if g.regions.allSatisfy({ $0 & bit != 0 }) { return .required }
+        if g.regions.allSatisfy({ $0 & bit == 0 }) { return .excluded }
+        return .mixed
+    }
+
+    // MARK: Group management
+
+    func addGroup() {
+        let g = VennGroup()
+        groups.append(g)
+        activeGroupID = g.id
+        refreshResults()
+    }
+
+    func removeGroup(_ id: UUID) {
+        guard groups.count > 1, let i = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups.remove(at: i)
+        if activeGroupID == id { activeGroupID = groups[min(i, groups.count - 1)].id }
+        refreshResults()
+    }
+
+    func activateGroup(_ id: UUID) {
+        guard groups.contains(where: { $0.id == id }) else { return }
+        activeGroupID = id
+    }
+
+    func setGroupMode(_ id: UUID, _ m: MatchMode) {
+        guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups[i].mode = m
+        groups[i].regions = []   // choosing a preset clears painted regions
+        refreshResults()
+    }
+
+    func toggleGroupOp(_ id: UUID) {
+        guard let i = groups.firstIndex(where: { $0.id == id }), i > 0 else { return }
+        groups[i].op = groups[i].op == .and ? .or : .and
+        refreshResults()
+    }
+
+    /// Toggle a painted region on one diagram.
+    func toggleRegion(group id: UUID, mask: Int) {
+        guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
+        if groups[i].regions.contains(mask) { groups[i].regions.remove(mask) }
+        else { groups[i].regions.insert(mask) }
+        refreshResults()
+    }
+
+    func clearRegions(group id: UUID) {
+        guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups[i].regions = []
+        refreshResults()
+    }
+
+    // MARK: Tag mutation (group-aware)
+
+    /// Add a tag as a new circle on the ACTIVE diagram (no-op if it's already
+    /// on any diagram — unless region-excluded there, which re-includes it).
     func include(_ tag: String) {
         queryExcludes.remove(tag)
-        if querySets.contains(tag) {
-            // Venn mode: re-including a region-excluded set = lift the
-            // constraint (re-split its regions) rather than a no-op.
-            if regionRole(tag) == .excluded, let i = querySets.firstIndex(of: tag) {
+        if let gi = owningGroupIndex(of: tag) {
+            // re-including a region-excluded set lifts the constraint
+            if regionRole(tag) == .excluded, let i = groups[gi].sets.firstIndex(of: tag) {
                 let bit = 1 << i
-                selectedRegions = Set(selectedRegions.flatMap { [$0, $0 | bit] })
+                groups[gi].regions = Set(groups[gi].regions.flatMap { [$0, $0 | bit] })
             }
             refreshResults()
         } else {
-            mutateSets { $0.append(tag) }
+            mutateSets(in: activeGroupIndex) { $0.append(tag) }
         }
     }
 
-    /// Exclude a tag (NOT). In Venn mode a set stays ON the diagram — its
-    /// circle remains and the painted regions are constrained to the ones
-    /// without it. Outside Venn mode it moves to the excludes list.
+    /// Exclude a tag. If it's a circle with painted regions, constrain that
+    /// diagram's regions (circle stays); otherwise move it to the excludes.
     func exclude(_ tag: String) {
-        if matchMode == .regions, !selectedRegions.isEmpty,
-           let i = querySets.firstIndex(of: tag) {
+        if let gi = owningGroupIndex(of: tag), !groups[gi].regions.isEmpty,
+           let i = groups[gi].sets.firstIndex(of: tag) {
             let bit = 1 << i
-            let constrained = Set(selectedRegions.map { $0 & ~bit }).filter { $0 != 0 }
+            let constrained = Set(groups[gi].regions.map { $0 & ~bit }).filter { $0 != 0 }
             if !constrained.isEmpty {
-                selectedRegions = constrained
+                groups[gi].regions = constrained
                 refreshResults()
                 return
             }
-            // constraining left nothing — fall through to a hard exclude
         }
         queryExcludes.insert(tag)
-        if querySets.contains(tag) {
-            mutateSets { $0.removeAll { $0 == tag } }
+        if let gi = owningGroupIndex(of: tag) {
+            mutateSets(in: gi) { $0.removeAll { $0 == tag } }
         } else {
             refreshResults()
         }
@@ -292,8 +367,8 @@ final class TagStore: ObservableObject {
     /// Drop a tag from the query entirely.
     func clear(_ tag: String) {
         queryExcludes.remove(tag)
-        if querySets.contains(tag) {
-            mutateSets { $0.removeAll { $0 == tag } }
+        if let gi = owningGroupIndex(of: tag) {
+            mutateSets(in: gi) { $0.removeAll { $0 == tag } }
         } else {
             refreshResults()
         }
@@ -307,68 +382,31 @@ final class TagStore: ObservableObject {
         }
     }
 
-    /// Cycle through the states the user sees: + → − → off. Uses the
-    /// region-aware effective state so Venn-mode chips behave predictably.
+    /// Cycle through the states the user sees: + → − → off.
     func cycle(_ tag: String) { set(tag, to: effectiveState(for: tag).next) }
 
     func clearQuery() {
-        querySets = []
+        let g = VennGroup()
+        groups = [g]
+        activeGroupID = g.id
         queryExcludes = []
-        selectedRegions = []
-        matchMode = .all
         refreshResults()
-    }
-
-    /// Keep the Venn chain to its first `count` sets (breadcrumb click).
-    func truncateSets(to count: Int) {
-        guard count < querySets.count else { return }
-        mutateSets { $0 = Array($0.prefix(count)) }
     }
 
     func popSet() {
-        guard !querySets.isEmpty else { return }
-        mutateSets { $0.removeLast() }
+        let gi = activeGroupIndex
+        guard !groups[gi].sets.isEmpty else { return }
+        mutateSets(in: gi) { $0.removeLast() }
     }
 
-    /// Toggle a Venn region; painting regions switches to .regions mode.
-    func toggleRegion(_ mask: Int) {
-        if selectedRegions.contains(mask) { selectedRegions.remove(mask) }
-        else { selectedRegions.insert(mask) }
-        matchMode = .regions
-        refreshResults()
-    }
-
-    func clearRegions() {
-        selectedRegions = []
-        refreshResults()
-    }
-
-    func setMatchMode(_ m: MatchMode) {
-        matchMode = m
-        if m != .regions { selectedRegions = [] }
-        refreshResults()
-    }
-
-    /// In .regions mode, what the painted regions imply for this set: present
-    /// in every selected region (required), in none (effectively NOT), or mixed.
-    func regionRole(_ tag: String) -> RegionRole? {
-        guard matchMode == .regions, !selectedRegions.isEmpty,
-              let i = querySets.firstIndex(of: tag) else { return nil }
-        let bit = 1 << i
-        if selectedRegions.allSatisfy({ $0 & bit != 0 }) { return .required }
-        if selectedRegions.allSatisfy({ $0 & bit == 0 }) { return .excluded }
-        return .mixed
-    }
-
-    /// Apply a change to querySets and remap selected regions so painted
-    /// overlaps survive adding/removing sets instead of being nuked.
-    private func mutateSets(_ change: (inout [String]) -> Void) {
-        let old = querySets
+    /// Apply a change to one diagram's sets, remapping its painted regions so
+    /// overlaps survive adding/removing circles.
+    private func mutateSets(in gi: Int, _ change: (inout [String]) -> Void) {
+        let old = groups[gi].sets
         var new = old
         change(&new)
-        querySets = new
-        selectedRegions = Self.remapRegions(selectedRegions, from: old, to: new)
-        if selectedRegions.isEmpty && matchMode == .regions { matchMode = .all }
+        groups[gi].sets = new
+        groups[gi].regions = Self.remapRegions(groups[gi].regions, from: old, to: new)
         refreshResults()
     }
 
@@ -436,30 +474,39 @@ final class TagStore: ObservableObject {
         return mask
     }
 
-    /// Evaluate THE query against the catalog. Every mode is a different gate
-    /// over the same membership mask; excludes always apply.
+    /// Evaluate THE query as sum-of-products over the diagrams: OR junctions
+    /// split clauses, AND binds within a clause; an item passes when any
+    /// clause passes and no exclude matches. Per diagram: painted regions
+    /// gate the membership mask; otherwise the diagram's mode does.
     func refreshResults() {
         if mode == .queue { results = sortItems(queueItems); return }
-        let sets = querySets
+        let activeGroups = groups.filter { !$0.sets.isEmpty }
         let exc = activeExcludes
-        guard !sets.isEmpty || !exc.isEmpty else { results = []; return }
-        let gate = matchMode
-        let full = (1 << sets.count) - 1
-        let setSet = Set(sets)
-        let sel = selectedRegions
+        guard !activeGroups.isEmpty || !exc.isEmpty else { results = []; return }
+
+        // Split into OR-separated clauses of AND-joined diagrams.
+        var clauses: [[VennGroup]] = []
+        for g in activeGroups {
+            if clauses.isEmpty || g.op == .or { clauses.append([g]) }
+            else { clauses[clauses.count - 1].append(g) }
+        }
+
+        func passes(_ item: FileItem, _ g: VennGroup) -> Bool {
+            let mask = membershipMask(of: item, over: g.sets)
+            if !g.regions.isEmpty { return g.regions.contains(mask) }
+            switch g.mode {
+            case .all:  return mask == (1 << g.sets.count) - 1
+            case .any:  return mask != 0
+            case .only: return item.tagSet == Set(g.sets)
+            }
+        }
 
         let filtered = allItems.filter { item in
-            if !sets.isEmpty {
-                let mask = membershipMask(of: item, over: sets)
-                let ok: Bool
-                switch gate {
-                case .all:  ok = mask == full
-                case .any:  ok = mask != 0
-                case .only: ok = item.tagSet == setSet
-                case .regions:
-                    ok = sel.isEmpty ? mask != 0 : sel.contains(mask)
+            if !clauses.isEmpty {
+                let anyClause = clauses.contains { clause in
+                    clause.allSatisfy { passes(item, $0) }
                 }
-                if !ok { return false }
+                if !anyClause { return false }
             }
             for e in exc where hasTag(item, e) { return false }
             return true
@@ -639,14 +686,13 @@ final class TagStore: ObservableObject {
 
     /// Carry a tag's query membership across a rename.
     private func swapState(_ from: String, _ to: String) {
-        let s = state(for: from)
-        guard s != .off else { return }
-        if s == .include, let idx = querySets.firstIndex(of: from) {
-            // in-place swap preserves Venn set order and region masks
-            querySets[idx] = to
-        } else {
-            clear(from)
-            set(to, to: s)
+        if let gi = owningGroupIndex(of: from),
+           let idx = groups[gi].sets.firstIndex(of: from) {
+            // in-place swap preserves the diagram's set order and region masks
+            groups[gi].sets[idx] = to
+        } else if queryExcludes.contains(from) {
+            queryExcludes.remove(from)
+            queryExcludes.insert(to)
         }
     }
 
@@ -783,7 +829,6 @@ final class TagStore: ObservableObject {
         mode = m
         selection = []
         // The query persists across Tags/Queue/Explore — same model everywhere.
-        if m == .explore { viewStyle = .grid }
         if m == .queue { scanQueue() } else { refreshResults() }
     }
 

@@ -1,21 +1,55 @@
 import Foundation
+import SwiftUI
 
 /// Which left-column mode is active.
 enum LibraryMode { case tags, queue, explore }
 
-/// Which detail view is shown.
-enum ViewStyle { case grid, clusters }
+/// How a diagram's included sets combine when no regions are painted.
+///  - all:  item has every set (AND) — the default
+///  - any:  item has at least one (OR)
+///  - only: item's tags are exactly the sets, nothing else ("Exact",
+///          meaningful only when the query has a single diagram)
+enum MatchMode { case all, any, only }
 
-/// How included tags are combined.
-///  - all:     item has every included tag (AND) — the default
-///  - any:     item has at least one (OR)
-///  - only:    item's tags are exactly the included set, nothing else ("Exact")
-///  - regions: item's membership bitmask is one of the painted Venn regions
-enum MatchMode { case all, any, only, regions }
+/// How a diagram joins the previous one (ignored on the first diagram).
+/// The query evaluates as sum-of-products: OR starts a new clause, AND binds
+/// diagrams within a clause — `D1 AND D2 OR D3` = (D1 ∧ D2) ∨ D3.
+enum GroupOp: String { case and = "AND", or = "OR" }
 
-/// A Venn set's effective role across the selected regions (.regions mode):
+/// One Venn diagram: an ordered list of sets and (optionally) painted regions.
+/// Painted regions override `mode`.
+struct VennGroup: Identifiable, Equatable {
+    let id: UUID
+    var sets: [String]
+    var regions: Set<Int>     // membership bitmasks over `sets`; empty = use mode
+    var mode: MatchMode
+    var op: GroupOp           // how this diagram joins the previous one
+
+    init(id: UUID = UUID(), sets: [String] = [], regions: Set<Int> = [],
+         mode: MatchMode = .all, op: GroupOp = .and) {
+        self.id = id
+        self.sets = sets
+        self.regions = regions
+        self.mode = mode
+        self.op = op
+    }
+}
+
+/// A Venn set's effective role across a diagram's painted regions:
 /// required in all of them, excluded from all of them, or mixed.
 enum RegionRole { case required, excluded, mixed }
+
+/// Stable tag colors from the top-level prefix (a whole group shares a hue).
+enum TagPalette {
+    static let colors: [Color] =
+        [.blue, .purple, .pink, .orange, .green, .teal, .indigo, .mint, .red, .cyan]
+    static func color(for path: String) -> Color {
+        let key = path.split(separator: "/").first.map(String.init) ?? path
+        var h = 5381
+        for u in key.unicodeScalars { h = ((h << 5) &+ h) &+ Int(u.value) }
+        return colors[abs(h) % colors.count]
+    }
+}
 
 /// How the results grid is sorted.
 enum SortKey: String, CaseIterable, Identifiable {

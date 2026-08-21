@@ -6,6 +6,7 @@ import SwiftUI
 /// Static layout — no physics, no drift.
 struct TagMapView: View {
     let nodes: [TagNode]
+    var emptyMessage = "Nothing here"
     var onDrill: (String) -> Void
     var onLeaf: (String) -> Void
 
@@ -45,7 +46,11 @@ struct TagMapView: View {
                     }
                 }
                 if nodes.isEmpty {
-                    Text("Nothing here").foregroundStyle(.tertiary)
+                    Text(emptyMessage)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(24)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
