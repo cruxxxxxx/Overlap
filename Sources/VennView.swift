@@ -80,13 +80,13 @@ struct VennView: View {
                         .transition(.scale.combined(with: .opacity))
                 }
 
-                // counts are on-demand: only the hovered region and painted
-                // regions show their number (full list lives in the chips row)
+                // count appears only for the region under the cursor
+                // (the full list lives in the chips row)
                 let poles = Self.regionPoles(k: k, centers: centers, radii: radii, regions: regions)
                 ForEach(Array(regions.keys.sorted()), id: \.self) { mask in
                     if let cnt = regions[mask], cnt > 0,
                        let pole = poles[mask],
-                       selectedRegions.contains(mask) || mask == hoverMask {
+                       mask == hoverMask {
                         let on = selectedRegions.contains(mask)
                         Text("\(cnt)")
                             .font(.caption).bold().monospacedDigit()
