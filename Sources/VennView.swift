@@ -98,16 +98,29 @@ struct VennView: View {
                             .allowsHitTesting(false)
                     }
                 }
-                // set labels, inside their own circle, pushed away from neighbors
+                // set labels, inside their own circle, pushed away from
+                // neighbors. Clicking a label toggles that set's EXCLUSIVE
+                // region — the escape hatch when the only-this-set area is
+                // buried under other circles and can't be clicked directly.
                 ForEach(0..<k, id: \.self) { i in
-                    let inHover = hoverMask & (1 << i) != 0 && (regions[hoverMask] ?? 0) > 0
+                    let soloMask = 1 << i
+                    let solo = regions[soloMask] ?? 0
+                    let inHover = hoverMask & soloMask != 0 && (regions[hoverMask] ?? 0) > 0
+                    let soloOn = selectedRegions.contains(soloMask)
                     Text(tags[i].split(separator: "/").last.map(String.init) ?? tags[i])
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(inHover ? Color.accentColor : Color.primary.opacity(0.8))
+                        .foregroundStyle(soloOn ? Color.accentColor
+                                        : inHover ? Color.accentColor : Color.primary.opacity(0.8))
+                        .underline(soloOn)
                         .shadow(color: colorScheme == .dark ? .black.opacity(0.6) : .white.opacity(0.6),
                                 radius: 2)
                         .position(Self.labelAnchor(i: i, k: k, centers: centers, radii: radii))
-                        .allowsHitTesting(false)
+                        .onTapGesture {
+                            if solo > 0 { onToggleRegion(soloMask) }
+                        }
+                        .help(solo > 0
+                              ? "Click: only \(tags[i]) (\(solo)) — the exclusive region"
+                              : "No images carry only \(tags[i]) in this diagram")
                 }
             }
             .animation(.spring(response: 0.45, dampingFraction: 0.7), value: k)
@@ -119,7 +132,7 @@ struct VennView: View {
                 switch phase {
                 case .active(let p):
                     hovering = true
-                    hoverMask = maskAt(p, centers: centers, radii: radii, c: c, k: k)
+                    hoverMask = resolveMask(maskAt(p, centers: centers, radii: radii, c: c, k: k))
                 case .ended:
                     hovering = false
                     hoverMask = 0
@@ -137,7 +150,7 @@ struct VennView: View {
                     let moved = hypot(v.translation.width, v.translation.height)
                     panAtDragStart = pan
                     guard moved < 4 else { return }   // it was a pan, not a click
-                    let mask = maskAt(v.location, centers: centers, radii: radii, c: c, k: k)
+                    let mask = resolveMask(maskAt(v.location, centers: centers, radii: radii, c: c, k: k))
                     if mask != 0, (regions[mask] ?? 0) > 0 { onToggleRegion(mask) }
                 })
             .simultaneousGesture(MagnificationGesture()
@@ -150,6 +163,23 @@ struct VennView: View {
         }
         .frame(height: height)
         .clipped()
+    }
+
+    /// Layout can't always give every real intersection its own exposed
+    /// area (Euler impossibility). When the exact region under the cursor is
+    /// empty, fall through to the most specific NON-EMPTY sub-intersection —
+    /// so clicking a phantom triple-overlap selects the real pair inside it.
+    private func resolveMask(_ raw: Int) -> Int {
+        guard raw != 0 else { return 0 }
+        if (regions[raw] ?? 0) > 0 { return raw }
+        var best = 0, bestBits = 0, bestCnt = 0
+        for (m, cnt) in regions where cnt > 0 && (m & raw) == m {
+            let bits = m.nonzeroBitCount
+            if bits > bestBits || (bits == bestBits && cnt > bestCnt) {
+                best = m; bestBits = bits; bestCnt = cnt
+            }
+        }
+        return best
     }
 
     /// Which region (membership mask) sits under a point, inverse-mapped
@@ -213,6 +243,37 @@ struct VennView: View {
                 }
             }
         }
+        // isSubset[i][j]: every item with tag i also has tag j
+        var isSubset = [[Bool]](repeating: [Bool](repeating: false, count: k), count: k)
+        for i in 0..<k where withTag[i] > 0 {
+            for j in 0..<k where j != i {
+                isSubset[i][j] = pair[i][j] == withTag[i]
+            }
+        }
+        // a subset's circle must physically fit inside its container
+        for i in 0..<k {
+            for j in 0..<k where isSubset[i][j] {
+                radii[i] = min(radii[i], radii[j] - max(10, radii[j] * 0.2))
+            }
+        }
+        // Disjoint subsets sharing a container must fit side by side inside
+        // it: possible only when r_a + r_b ≤ R − gap. Scale them down until
+        // the geometry is feasible — then containment and separation can
+        // BOTH be satisfied instead of fighting.
+        for j in 0..<k {
+            let subs = (0..<k).filter { isSubset[$0][j] }
+            for a in subs {
+                for b in subs where b > a && pair[a][b] == 0 {
+                    let maxSum = radii[j] - 8
+                    let sum = radii[a] + radii[b]
+                    if sum > maxSum {
+                        let f = maxSum / sum
+                        radii[a] *= f
+                        radii[b] *= f
+                    }
+                }
+            }
+        }
 
         func targetDistance(_ i: Int, _ j: Int) -> CGFloat {
             let shared = pair[i][j]
@@ -248,6 +309,56 @@ struct VennView: View {
                 }
             }
             step *= 0.985
+        }
+
+        // Hard-constraint pass: springs compromise, geometry may not.
+        // Subsets get clamped fully INSIDE their containers (circle-packed),
+        // and disjoint pairs may not visually overlap.
+        for _ in 0..<80 {
+            for i in 0..<k {
+                for j in 0..<k where isSubset[i][j] {
+                    let dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y
+                    var d = sqrt(dx * dx + dy * dy)
+                    if d < 0.01 { d = 0.01 }
+                    let maxD = radii[j] - radii[i] - 5
+                    if d > maxD {
+                        // pull the subset back inside; the container stays put
+                        let pull = d - maxD
+                        pos[i].x -= dx / d * pull
+                        pos[i].y -= dy / d * pull
+                    }
+                }
+            }
+            for i in 0..<k {
+                for j in (i + 1)..<k where pair[i][j] == 0 {
+                    let dx = pos[j].x - pos[i].x, dy = pos[j].y - pos[i].y
+                    var d = sqrt(dx * dx + dy * dy)
+                    if d < 0.01 { d = 0.01 }
+                    let minD = radii[i] + radii[j] + 4
+                    if d < minD {
+                        let push = (minD - d) / 2
+                        pos[i].x -= dx / d * push; pos[i].y -= dy / d * push
+                        pos[j].x += dx / d * push; pos[j].y += dy / d * push
+                    }
+                }
+            }
+        }
+        // Containment gets the FINAL word — the disjoint push above may have
+        // nudged a subset back over its container's rim on the last round.
+        for _ in 0..<30 {
+            for i in 0..<k {
+                for j in 0..<k where isSubset[i][j] {
+                    let dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y
+                    var d = sqrt(dx * dx + dy * dy)
+                    if d < 0.01 { d = 0.01 }
+                    let maxD = radii[j] - radii[i] - 5
+                    if d > maxD {
+                        let pull = d - maxD
+                        pos[i].x -= dx / d * pull
+                        pos[i].y -= dy / d * pull
+                    }
+                }
+            }
         }
 
         // fit the settled layout into the canvas (scale positions AND radii)

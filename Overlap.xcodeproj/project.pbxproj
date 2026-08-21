@@ -1,0 +1,390 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		07D0BDA5185A7D9769FF4E81 /* PreviewPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DC1354E4EC383D845FE2D7A /* PreviewPane.swift */; };
+		08CD41961A3E1632DB0D4256 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B9C15B9609A8CAED2BBD620 /* Models.swift */; };
+		09926E3E73856F45B88ADD2A /* QuickLookController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDFD72BDB677E4DD2A8438F1 /* QuickLookController.swift */; };
+		205BA07F5ED297F3FF765B28 /* Overlap.icns in Resources */ = {isa = PBXBuildFile; fileRef = 1E9FE1CD98B00C98579C61B8 /* Overlap.icns */; };
+		2D4AF165C4F11F21C17491F6 /* ThumbnailCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 956C68E832660A3C577EDC5B /* ThumbnailCell.swift */; };
+		41569B206A51BC0ABE25BE60 /* OverlapApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E2D644A019FBE86AB4F2C6 /* OverlapApp.swift */; };
+		4160A953929876308C393B85 /* ResultsGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C8E8108F1CA14CBFA3F0830 /* ResultsGridView.swift */; };
+		44AF7A81E7208F108B82F633 /* QueryBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89A47F300D6D684652E8A861 /* QueryBar.swift */; };
+		516197EC1F6C0FE2A8206282 /* TVExceptionCatcher.m in Sources */ = {isa = PBXBuildFile; fileRef = FD655206D88A960895B7C619 /* TVExceptionCatcher.m */; };
+		7089DE528251BC9746C53754 /* TagStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FCB2B4B7D0A2C2059AEBE03 /* TagStore.swift */; };
+		7BA82D0875309D6CA0F6B7D3 /* CirclePack.swift in Sources */ = {isa = PBXBuildFile; fileRef = B22DED0C110EF7F8CF7C2E6B /* CirclePack.swift */; };
+		848A3FC7734D585EE61402B9 /* StatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 515E9CBCE47D2CF35FB855CF /* StatsView.swift */; };
+		9E65DBDF5162B933EA60FE14 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5B282B55068C433819CF615 /* SidebarView.swift */; };
+		B05CA40DE972117A9C3B8AFF /* VennView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A429FB3EBD72A5FAAD05BDEE /* VennView.swift */; };
+		C2AB16B6958CA1E93792DE6F /* ThumbnailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59C4E3A3894AA2C2D2826E63 /* ThumbnailCache.swift */; };
+		D566F2F4C8BEE89BC0B31A9A /* TagIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56EE77C009857BE25A9C6DFE /* TagIO.swift */; };
+		E79E337DC39FF228D4472737 /* ExploreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19747B4E7F1808FFF2AE64A5 /* ExploreView.swift */; };
+		FC2B18FBA3BB72EDBBCD3EE8 /* TagMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE720A61E4769A5E60B62A72 /* TagMapView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		19747B4E7F1808FFF2AE64A5 /* ExploreView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreView.swift; sourceTree = "<group>"; };
+		1E9FE1CD98B00C98579C61B8 /* Overlap.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = Overlap.icns; sourceTree = "<group>"; };
+		2B9C15B9609A8CAED2BBD620 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		3E120A68CA2D3EED3B3072D2 /* Overlap-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Overlap-Bridging-Header.h"; sourceTree = "<group>"; };
+		515E9CBCE47D2CF35FB855CF /* StatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsView.swift; sourceTree = "<group>"; };
+		56EE77C009857BE25A9C6DFE /* TagIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagIO.swift; sourceTree = "<group>"; };
+		59C4E3A3894AA2C2D2826E63 /* ThumbnailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailCache.swift; sourceTree = "<group>"; };
+		7FCB2B4B7D0A2C2059AEBE03 /* TagStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagStore.swift; sourceTree = "<group>"; };
+		89A47F300D6D684652E8A861 /* QueryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryBar.swift; sourceTree = "<group>"; };
+		956C68E832660A3C577EDC5B /* ThumbnailCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailCell.swift; sourceTree = "<group>"; };
+		9C8E8108F1CA14CBFA3F0830 /* ResultsGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResultsGridView.swift; sourceTree = "<group>"; };
+		9DC1354E4EC383D845FE2D7A /* PreviewPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewPane.swift; sourceTree = "<group>"; };
+		A429FB3EBD72A5FAAD05BDEE /* VennView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VennView.swift; sourceTree = "<group>"; };
+		B22DED0C110EF7F8CF7C2E6B /* CirclePack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CirclePack.swift; sourceTree = "<group>"; };
+		B5B282B55068C433819CF615 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		CDFD72BDB677E4DD2A8438F1 /* QuickLookController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookController.swift; sourceTree = "<group>"; };
+		CE720A61E4769A5E60B62A72 /* TagMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagMapView.swift; sourceTree = "<group>"; };
+		D1F45A6D0FEF48E8E8466FD6 /* Overlap.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Overlap.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DC9A63DFD67472CDE62C5C3C /* TVExceptionCatcher.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TVExceptionCatcher.h; sourceTree = "<group>"; };
+		E5E2D644A019FBE86AB4F2C6 /* OverlapApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlapApp.swift; sourceTree = "<group>"; };
+		FD655206D88A960895B7C619 /* TVExceptionCatcher.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = TVExceptionCatcher.m; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		056AA80EF23DF3AE3F31CFE5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				D1F45A6D0FEF48E8E8466FD6 /* Overlap.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		2B637B9B1BA565B8619A7011 = {
+			isa = PBXGroup;
+			children = (
+				C62C9EB7BE7EF74F41519A94 /* Resources */,
+				7DA470D6EAD067B8C510C864 /* Sources */,
+				056AA80EF23DF3AE3F31CFE5 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		7DA470D6EAD067B8C510C864 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				B22DED0C110EF7F8CF7C2E6B /* CirclePack.swift */,
+				19747B4E7F1808FFF2AE64A5 /* ExploreView.swift */,
+				2B9C15B9609A8CAED2BBD620 /* Models.swift */,
+				3E120A68CA2D3EED3B3072D2 /* Overlap-Bridging-Header.h */,
+				E5E2D644A019FBE86AB4F2C6 /* OverlapApp.swift */,
+				9DC1354E4EC383D845FE2D7A /* PreviewPane.swift */,
+				89A47F300D6D684652E8A861 /* QueryBar.swift */,
+				CDFD72BDB677E4DD2A8438F1 /* QuickLookController.swift */,
+				9C8E8108F1CA14CBFA3F0830 /* ResultsGridView.swift */,
+				B5B282B55068C433819CF615 /* SidebarView.swift */,
+				515E9CBCE47D2CF35FB855CF /* StatsView.swift */,
+				56EE77C009857BE25A9C6DFE /* TagIO.swift */,
+				CE720A61E4769A5E60B62A72 /* TagMapView.swift */,
+				7FCB2B4B7D0A2C2059AEBE03 /* TagStore.swift */,
+				59C4E3A3894AA2C2D2826E63 /* ThumbnailCache.swift */,
+				956C68E832660A3C577EDC5B /* ThumbnailCell.swift */,
+				DC9A63DFD67472CDE62C5C3C /* TVExceptionCatcher.h */,
+				FD655206D88A960895B7C619 /* TVExceptionCatcher.m */,
+				A429FB3EBD72A5FAAD05BDEE /* VennView.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		C62C9EB7BE7EF74F41519A94 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				1E9FE1CD98B00C98579C61B8 /* Overlap.icns */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		8E95B97913FF8DE5E7F200D7 /* Overlap */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 941E7B49CC7F6BD67214FC06 /* Build configuration list for PBXNativeTarget "Overlap" */;
+			buildPhases = (
+				E809EC63F24E2FB098795958 /* Sources */,
+				7E16E70C4747B8E75EB31836 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Overlap;
+			packageProductDependencies = (
+			);
+			productName = Overlap;
+			productReference = D1F45A6D0FEF48E8E8466FD6 /* Overlap.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		66EA416549FFFC555ABFD400 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					8E95B97913FF8DE5E7F200D7 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 007179EA86BC86183C875795 /* Build configuration list for PBXProject "Overlap" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 2B637B9B1BA565B8619A7011;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 056AA80EF23DF3AE3F31CFE5 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				8E95B97913FF8DE5E7F200D7 /* Overlap */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		7E16E70C4747B8E75EB31836 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				205BA07F5ED297F3FF765B28 /* Overlap.icns in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		E809EC63F24E2FB098795958 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7BA82D0875309D6CA0F6B7D3 /* CirclePack.swift in Sources */,
+				E79E337DC39FF228D4472737 /* ExploreView.swift in Sources */,
+				08CD41961A3E1632DB0D4256 /* Models.swift in Sources */,
+				41569B206A51BC0ABE25BE60 /* OverlapApp.swift in Sources */,
+				07D0BDA5185A7D9769FF4E81 /* PreviewPane.swift in Sources */,
+				44AF7A81E7208F108B82F633 /* QueryBar.swift in Sources */,
+				09926E3E73856F45B88ADD2A /* QuickLookController.swift in Sources */,
+				4160A953929876308C393B85 /* ResultsGridView.swift in Sources */,
+				9E65DBDF5162B933EA60FE14 /* SidebarView.swift in Sources */,
+				848A3FC7734D585EE61402B9 /* StatsView.swift in Sources */,
+				516197EC1F6C0FE2A8206282 /* TVExceptionCatcher.m in Sources */,
+				D566F2F4C8BEE89BC0B31A9A /* TagIO.swift in Sources */,
+				FC2B18FBA3BB72EDBBCD3EE8 /* TagMapView.swift in Sources */,
+				7089DE528251BC9746C53754 /* TagStore.swift in Sources */,
+				C2AB16B6958CA1E93792DE6F /* ThumbnailCache.swift in Sources */,
+				2D4AF165C4F11F21C17491F6 /* ThumbnailCell.swift in Sources */,
+				B05CA40DE972117A9C3B8AFF /* VennView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		35842FAAC3E0DBA74B5D9B99 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.1;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		7272FF743CFA5EC579DFABB0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CLANG_ENABLE_MODULES = YES;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.mike.overlap;
+				SDKROOT = macosx;
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/Overlap-Bridging-Header.h";
+			};
+			name = Debug;
+		};
+		88F92FEE9AE948F86B6338A3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CLANG_ENABLE_MODULES = YES;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.mike.overlap;
+				SDKROOT = macosx;
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/Overlap-Bridging-Header.h";
+			};
+			name = Release;
+		};
+		FD3058CE9DB28A8FD2575CC4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.1;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		007179EA86BC86183C875795 /* Build configuration list for PBXProject "Overlap" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FD3058CE9DB28A8FD2575CC4 /* Debug */,
+				35842FAAC3E0DBA74B5D9B99 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		941E7B49CC7F6BD67214FC06 /* Build configuration list for PBXNativeTarget "Overlap" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7272FF743CFA5EC579DFABB0 /* Debug */,
+				88F92FEE9AE948F86B6338A3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 66EA416549FFFC555ABFD400 /* Project object */;
+}

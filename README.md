@@ -1,4 +1,4 @@
-# TagVenn
+# Overlap
 
 A native macOS app for browsing, tagging, and organizing images by **Finder tags** —
 with the boolean queries and batch workflows Finder and other tag tools lack.
@@ -36,7 +36,7 @@ Requires Xcode 15+ (macOS 13+ target). The project is generated with
 ```sh
 brew install xcodegen      # if not installed
 xcodegen generate
-open TagVenn.xcodeproj      # then ⌘R
+open Overlap.xcodeproj      # then ⌘R
 ```
 
 The app runs unsandboxed (local personal use) so it can read/write tags across

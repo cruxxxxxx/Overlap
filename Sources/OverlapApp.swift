@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct TagVennApp: App {
+struct OverlapApp: App {
     @StateObject private var store = TagStore(scope: defaultScope)
 
     static var defaultScope: URL {
@@ -78,7 +78,7 @@ struct ContentView: View {
                 .disabled(store.results.isEmpty)
             }
         }
-        .navigationTitle("TagVenn")
+        .navigationTitle("Overlap")
         .sheet(isPresented: $showStats) { StatsView().environmentObject(store) }
     }
 

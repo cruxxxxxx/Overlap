@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>TagVenn</string>
+	<string>Overlap</string>
 	<key>CFBundleDisplayName</key>
-	<string>TagVenn</string>
+	<string>Overlap</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.mike.tagvenn</string>
+	<string>com.mike.overlap</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -18,6 +18,8 @@
 	<string>13.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>CFBundleIconFile</key>
+	<string>Overlap</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

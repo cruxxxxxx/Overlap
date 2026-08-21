@@ -1,4 +1,4 @@
-name: TagVenn
+name: Overlap
 options:
   bundleIdPrefix: com.mike
   deploymentTarget:
@@ -15,16 +15,18 @@ settings:
     CODE_SIGNING_ALLOWED: "NO"
     ENABLE_HARDENED_RUNTIME: "NO"
 targets:
-  TagVenn:
+  Overlap:
     type: application
     platform: macOS
     sources:
       - Sources
+      - path: Resources/Overlap.icns
+        buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.mike.tagvenn
+        PRODUCT_BUNDLE_IDENTIFIER: com.mike.overlap
         INFOPLIST_FILE: Resources/Info.plist
-        SWIFT_OBJC_BRIDGING_HEADER: Sources/TagVenn-Bridging-Header.h
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Overlap-Bridging-Header.h
         CLANG_ENABLE_MODULES: "YES"
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         COMBINE_HIDPI_IMAGES: "YES"

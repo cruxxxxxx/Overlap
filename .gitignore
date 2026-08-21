@@ -11,3 +11,4 @@ build/
 # Swift Package Manager
 .build/
 .swiftpm/
+dist/
