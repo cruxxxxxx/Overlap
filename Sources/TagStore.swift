@@ -2,6 +2,8 @@ import Foundation
 import Combine
 import ImageIO
 import UniformTypeIdentifiers
+import CryptoKit
+import Security
 
 /// One reversible action: an inverse (`undo`) and a re-do closure.
 private struct UndoStep {
@@ -36,6 +38,17 @@ final class TagStore: ObservableObject {
     @Published var knownTags: Set<String> = []
     /// Custom order for top-level tags (names). Unlisted ones fall back to A→Z.
     @Published var tagOrder: [String] = []
+
+    // Hidden tags & default query stance.
+    /// Tags whose files vanish from every surface while locked. Applies to the
+    /// exact tag and anything beneath it (a hidden `secret` also hides
+    /// `secret/…`). Persisted; the reveal state itself is session-only.
+    @Published var hiddenTags: Set<String> = []
+    /// Whether hidden tags are currently revealed. Always false at launch.
+    @Published private(set) var revealed = false
+    /// Per-tag default query stance, seeded into every fresh query. A hidden
+    /// NSFW tag typically defaults to `.exclude` so it never shows unopted.
+    @Published var tagDefaults: [String: TriState] = [:]
 
     // Results
     @Published var results: [FileItem] = []
@@ -72,6 +85,9 @@ final class TagStore: ObservableObject {
     private var redoStack: [UndoStep] = []
 
     private var allItems: [FileItem] = []
+    /// allItems minus hidden-tagged files while locked; the pool every surface
+    /// (results, counts, tree, Venn, stats) actually reads from.
+    private var visibleItems: [FileItem] = []
     private let catalogQuery = NSMetadataQuery()
     private var observers: [NSObjectProtocol] = []
     private let tagAttr = "kMDItemUserTags"
@@ -79,11 +95,16 @@ final class TagStore: ObservableObject {
         ["jpg", "jpeg", "png", "gif", "webp", "heic", "tif", "tiff", "bmp"]
     private let foldersDefaultsKey = "queueFolders"
     private let recursiveDefaultsKey = "queueRecursive"
+    private let hiddenTagsKey = "hiddenTags"
+    private let tagDefaultsKey = "tagDefaults"
+    private let passSaltKey = "hiddenPassSalt"
+    private let passHashKey = "hiddenPassHash"
 
     init(scope: URL) {
         self.scopeURL = scope
         activeGroupID = groups[0].id
         loadQueueFolders()
+        applyQueryDefaults()   // seed the query from per-tag default stances
         wireQueries()
         start()
     }
@@ -120,24 +141,29 @@ final class TagStore: ObservableObject {
 
     // MARK: - Catalog
 
+    /// Spotlight can report the same file under either the `/Users/…` firmlink
+    /// or its `/System/Volumes/Data/Users/…` backing path. Resolve to one
+    /// canonical form so a file is never seen (or appended) twice.
+    private func canonicalURL(_ path: String) -> URL {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath()
+    }
+
     private func rebuildCatalog() {
         catalogQuery.disableUpdates()
-        var counts: [String: Int] = [:]
         var items: [FileItem] = []
         for i in 0..<catalogQuery.resultCount {
             guard let item = catalogQuery.result(at: i) as? NSMetadataItem,
                   let path = item.value(forAttribute: NSMetadataItemPathKey) as? String,
                   let tags = item.value(forAttribute: tagAttr) as? [String] else { continue }
-            for tag in tags { counts[tag, default: 0] += 1 }
             let mod = item.value(forAttribute: "kMDItemContentModificationDate") as? Date
             let created = item.value(forAttribute: "kMDItemContentCreationDate") as? Date
             let size = (item.value(forAttribute: "kMDItemFSSize") as? NSNumber)?.int64Value
-            items.append(FileItem(url: URL(fileURLWithPath: path), tags: tags,
+            items.append(FileItem(url: canonicalURL(path), tags: tags,
                                   modDate: mod, createdDate: created, size: size))
         }
         catalogQuery.enableUpdates()
-        allItems = items
-        applyCounts(counts)
+        allItems = Self.deduped(items)
+        recomputeCounts()   // rebuilds the visible pool + counts + tree
         isIndexing = false
         refreshVisible()
     }
@@ -161,7 +187,7 @@ final class TagStore: ObservableObject {
             else { continue }
             // Read from disk, not Spotlight's (briefly stale) index — avoids the
             // count flickering up/down right after an edit.
-            let fi = FileItem.load(URL(fileURLWithPath: path))
+            let fi = FileItem.load(canonicalURL(path))
             if let idx = allItems.firstIndex(where: { $0.id == fi.id }) {
                 allItems[idx] = fi
             } else {
@@ -170,9 +196,12 @@ final class TagStore: ObservableObject {
         }
         for item in removed {
             if let path = item.value(forAttribute: NSMetadataItemPathKey) as? String {
-                allItems.removeAll { $0.id == path }
+                let key = canonicalURL(path).path
+                allItems.removeAll { $0.id == key }
             }
         }
+        // Enforce the one-entry-per-path invariant on every catalog change.
+        allItems = Self.deduped(allItems)
         if !added.isEmpty || !removed.isEmpty {
             allItems.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         }
@@ -183,8 +212,75 @@ final class TagStore: ObservableObject {
     private func applyCounts(_ counts: [String: Int]) {
         var merged = counts
         for t in knownTags where merged[t] == nil { merged[t] = 0 }
+        // While locked, hidden tags are stripped from the tree entirely so they
+        // can't be seen, counted, or added to a query.
+        if !revealed {
+            merged = merged.filter { !isHiddenTag($0.key) }
+        }
         tagCounts = merged
         tagTree = TagNode.buildTree(from: merged)
+    }
+
+    // MARK: - Hidden-tag pool
+
+    /// A tag is hidden if it's marked hidden or lives beneath one that is.
+    func isHiddenTag(_ tag: String) -> Bool {
+        hiddenTags.contains(tag) || hiddenTags.contains { tag.hasPrefix($0 + "/") }
+    }
+
+    private func itemHidden(_ item: FileItem) -> Bool {
+        item.tagSet.contains { isHiddenTag($0) }
+    }
+
+    /// Enforce one entry per path. Spotlight can occasionally surface the same
+    /// path twice during a rescan, and stale entries can linger after files
+    /// move; either would render a file twice in the grid.
+    private static func deduped(_ items: [FileItem]) -> [FileItem] {
+        var seen = Set<String>()
+        var out: [FileItem] = []
+        out.reserveCapacity(items.count)
+        for it in items where seen.insert(it.id).inserted {
+            out.append(it)
+        }
+        return out
+    }
+
+    /// Recompute the visible pool: everything when revealed (or nothing hidden),
+    /// otherwise allItems with hidden-tagged files removed.
+    private func rebuildPool() {
+        if revealed || hiddenTags.isEmpty {
+            visibleItems = allItems
+        } else {
+            visibleItems = allItems.filter { !itemHidden($0) }
+        }
+    }
+
+    /// Re-derive everything after the lock state or hidden set changes.
+    private func applyVisibility() {
+        recomputeCounts()   // rebuilds pool + counts + tree
+        reconcileHiddenInQuery()
+        refreshResults()
+    }
+
+    /// Keep hidden tags out of the visible query while locked (so their names
+    /// never surface as chips) and re-seed their opt-in default when revealed.
+    private func reconcileHiddenInQuery() {
+        if revealed {
+            for (tag, stance) in tagDefaults where isHiddenTag(tag) {
+                if stance == .exclude, owningGroupIndex(of: tag) == nil {
+                    queryExcludes.insert(tag)
+                }
+            }
+        } else {
+            for tag in Array(queryExcludes) where isHiddenTag(tag) {
+                queryExcludes.remove(tag)
+            }
+            for gi in groups.indices where groups[gi].sets.contains(where: { isHiddenTag($0) }) {
+                let old = groups[gi].sets
+                groups[gi].sets = old.filter { !isHiddenTag($0) }
+                groups[gi].regions = Self.remapRegions(groups[gi].regions, from: old, to: groups[gi].sets)
+            }
+        }
     }
 
     /// Create a tag (or subtag) in the taxonomy without needing a file yet.
@@ -209,8 +305,9 @@ final class TagStore: ObservableObject {
     }
 
     private func recomputeCounts() {
+        rebuildPool()
         var counts: [String: Int] = [:]
-        for item in allItems { for tag in item.tags { counts[tag, default: 0] += 1 } }
+        for item in visibleItems { for tag in item.tags { counts[tag, default: 0] += 1 } }
         applyCounts(counts)
     }
 
@@ -223,7 +320,7 @@ final class TagStore: ObservableObject {
         // An empty OR diagram starts a fresh clause — its candidates come from
         // the whole catalog, not the other diagrams' intersection.
         let freshClause = activeGroup.sets.isEmpty && activeGroup.op == .or
-        let base = (active.isEmpty || freshClause) ? allItems : results
+        let base = (active.isEmpty || freshClause) ? visibleItems : results
         var counts: [String: Int] = [:]
         for item in base {
             for t in item.tags where !active.contains(t) { counts[t, default: 0] += 1 }
@@ -390,7 +487,91 @@ final class TagStore: ObservableObject {
         groups = [g]
         activeGroupID = g.id
         queryExcludes = []
+        applyQueryDefaults()
         refreshResults()
+    }
+
+    /// Seed the (freshly cleared) query from each tag's default stance. Mutates
+    /// the query state directly — the caller triggers the single refresh.
+    private func applyQueryDefaults() {
+        for (tag, stance) in tagDefaults {
+            // While locked, hidden tags are already filtered out of the pool;
+            // skip them so their names never surface as query chips.
+            if !revealed && isHiddenTag(tag) { continue }
+            switch stance {
+            case .include:
+                if owningGroupIndex(of: tag) == nil {
+                    groups[activeGroupIndex].sets.append(tag)
+                }
+            case .exclude:
+                queryExcludes.insert(tag)
+            case .off:
+                break
+            }
+        }
+    }
+
+    // MARK: - Hidden tags & default stance (public)
+
+    func setHidden(_ tag: String, _ hidden: Bool) {
+        if hidden { hiddenTags.insert(tag) } else { hiddenTags.remove(tag) }
+        UserDefaults.standard.set(Array(hiddenTags), forKey: hiddenTagsKey)
+        applyVisibility()
+    }
+
+    func defaultStance(_ tag: String) -> TriState { tagDefaults[tag] ?? .off }
+
+    func setDefault(_ tag: String, _ stance: TriState) {
+        if stance == .off { tagDefaults.removeValue(forKey: tag) }
+        else { tagDefaults[tag] = stance }
+        UserDefaults.standard.set(tagDefaults.mapValues { $0.rawValue }, forKey: tagDefaultsKey)
+    }
+
+    // MARK: - Passcode / reveal
+
+    var hasPasscode: Bool { UserDefaults.standard.string(forKey: passHashKey) != nil }
+
+    func setPasscode(_ code: String) {
+        guard !code.isEmpty else { return }
+        let salt = Self.randomSalt()
+        UserDefaults.standard.set(salt, forKey: passSaltKey)
+        UserDefaults.standard.set(Self.hashPass(code, salt: salt), forKey: passHashKey)
+    }
+
+    func removePasscode() {
+        UserDefaults.standard.removeObject(forKey: passSaltKey)
+        UserDefaults.standard.removeObject(forKey: passHashKey)
+    }
+
+    func verifyPasscode(_ code: String) -> Bool {
+        guard let salt = UserDefaults.standard.string(forKey: passSaltKey),
+              let hash = UserDefaults.standard.string(forKey: passHashKey) else { return true }
+        return Self.hashPass(code, salt: salt) == hash
+    }
+
+    /// Reveal hidden tags. Returns false only when a passcode is set and wrong.
+    @discardableResult
+    func reveal(_ code: String = "") -> Bool {
+        if hasPasscode && !verifyPasscode(code) { return false }
+        revealed = true
+        applyVisibility()
+        return true
+    }
+
+    func lock() {
+        revealed = false
+        applyVisibility()
+    }
+
+    private static func randomSalt() -> String {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return Data(bytes).base64EncodedString()
+    }
+
+    private static func hashPass(_ code: String, salt: String) -> String {
+        SHA256.hash(data: Data((salt + code).utf8))
+            .map { String(format: "%02x", $0) }.joined()
     }
 
     func popSet() {
@@ -449,7 +630,7 @@ final class TagStore: ObservableObject {
     /// Region counts for the Venn: membership bitmask -> item count.
     func vennData(_ tags: [String]) -> (totals: [Int], regions: [Int: Int]) {
         var regions: [Int: Int] = [:]
-        for item in allItems {
+        for item in visibleItems {
             let mask = membershipMask(of: item, over: tags)
             if mask != 0 { regions[mask, default: 0] += 1 }
         }
@@ -501,7 +682,7 @@ final class TagStore: ObservableObject {
             }
         }
 
-        let filtered = allItems.filter { item in
+        let filtered = visibleItems.filter { item in
             if !clauses.isEmpty {
                 let anyClause = clauses.contains { clause in
                     clause.allSatisfy { passes(item, $0) }
@@ -950,7 +1131,7 @@ final class TagStore: ObservableObject {
         var typeCounts: [String: Int] = [:]
         var totalSize: Int64 = 0
         var untagged = 0
-        for item in allItems {
+        for item in visibleItems {
             typeCounts[item.ext.isEmpty ? "—" : item.ext, default: 0] += 1
             totalSize += item.size ?? 0
             if item.tags.isEmpty { untagged += 1 }
@@ -959,9 +1140,9 @@ final class TagStore: ObservableObject {
         let topTags = tagCounts.filter { $0.value > 0 }
             .sorted { $0.value > $1.value }
             .prefix(15).map { ($0.key, $0.value) }
-        let largest = allItems.max { ($0.size ?? 0) < ($1.size ?? 0) }
+        let largest = visibleItems.max { ($0.size ?? 0) < ($1.size ?? 0) }
         return LibraryStats(
-            total: allItems.count,
+            total: visibleItems.count,
             totalSize: totalSize,
             tagCount: tagCounts.filter { $0.value > 0 }.count,
             untagged: untagged,
@@ -983,6 +1164,10 @@ final class TagStore: ObservableObject {
         showPreview = UserDefaults.standard.bool(forKey: "showPreview")
         knownTags = Set(UserDefaults.standard.stringArray(forKey: "knownTags") ?? [])
         tagOrder = UserDefaults.standard.stringArray(forKey: "tagOrder") ?? []
+        hiddenTags = Set(UserDefaults.standard.stringArray(forKey: hiddenTagsKey) ?? [])
+        if let raw = UserDefaults.standard.dictionary(forKey: tagDefaultsKey) as? [String: Int] {
+            tagDefaults = raw.compactMapValues { TriState(rawValue: $0) }
+        }
         if let raw = UserDefaults.standard.string(forKey: "sortKey"),
            let key = SortKey(rawValue: raw) { sortKey = key }
         if UserDefaults.standard.object(forKey: "sortAscending") != nil {

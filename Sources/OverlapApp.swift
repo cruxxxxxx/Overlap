@@ -24,6 +24,7 @@ struct OverlapApp: App {
 struct ContentView: View {
     @EnvironmentObject var store: TagStore
     @State private var showStats = false
+    @State private var showPrivacy = false
 
     var body: some View {
         NavigationSplitView {
@@ -46,6 +47,20 @@ struct ContentView: View {
                     Label("Stats", systemImage: "chart.bar")
                 }
                 .help("Library statistics")
+
+                Menu {
+                    Button("Privacy & Hidden Tags…") { showPrivacy = true }
+                    if store.revealed {
+                        Button("Lock Now") { store.lock() }
+                    }
+                } label: {
+                    Label("Hidden", systemImage: store.revealed ? "lock.open.fill" : "lock.fill")
+                } primaryAction: {
+                    if store.revealed { store.lock() } else { showPrivacy = true }
+                }
+                .help(store.revealed ? "Hidden tags revealed — click to lock"
+                                     : "Reveal or manage hidden tags")
+                .background(store.revealed ? Color.orange.opacity(0.25) : .clear)
 
                 Button { store.showPreview.toggle() } label: {
                     Label("Preview", systemImage: store.showPreview
@@ -80,6 +95,7 @@ struct ContentView: View {
         }
         .navigationTitle("Overlap")
         .sheet(isPresented: $showStats) { StatsView().environmentObject(store) }
+        .sheet(isPresented: $showPrivacy) { PrivacyView().environmentObject(store) }
     }
 
     private func chooseScope() {

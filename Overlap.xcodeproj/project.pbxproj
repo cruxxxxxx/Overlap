@@ -17,6 +17,7 @@
 		44AF7A81E7208F108B82F633 /* QueryBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89A47F300D6D684652E8A861 /* QueryBar.swift */; };
 		516197EC1F6C0FE2A8206282 /* TVExceptionCatcher.m in Sources */ = {isa = PBXBuildFile; fileRef = FD655206D88A960895B7C619 /* TVExceptionCatcher.m */; };
 		7089DE528251BC9746C53754 /* TagStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FCB2B4B7D0A2C2059AEBE03 /* TagStore.swift */; };
+		7121CEC02561332893D30898 /* PrivacyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 385582827B8FB3942C356EE5 /* PrivacyView.swift */; };
 		7BA82D0875309D6CA0F6B7D3 /* CirclePack.swift in Sources */ = {isa = PBXBuildFile; fileRef = B22DED0C110EF7F8CF7C2E6B /* CirclePack.swift */; };
 		848A3FC7734D585EE61402B9 /* StatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 515E9CBCE47D2CF35FB855CF /* StatsView.swift */; };
 		9E65DBDF5162B933EA60FE14 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5B282B55068C433819CF615 /* SidebarView.swift */; };
@@ -31,6 +32,7 @@
 		19747B4E7F1808FFF2AE64A5 /* ExploreView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreView.swift; sourceTree = "<group>"; };
 		1E9FE1CD98B00C98579C61B8 /* Overlap.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = Overlap.icns; sourceTree = "<group>"; };
 		2B9C15B9609A8CAED2BBD620 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		385582827B8FB3942C356EE5 /* PrivacyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyView.swift; sourceTree = "<group>"; };
 		3E120A68CA2D3EED3B3072D2 /* Overlap-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Overlap-Bridging-Header.h"; sourceTree = "<group>"; };
 		515E9CBCE47D2CF35FB855CF /* StatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsView.swift; sourceTree = "<group>"; };
 		56EE77C009857BE25A9C6DFE /* TagIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagIO.swift; sourceTree = "<group>"; };
@@ -78,6 +80,7 @@
 				3E120A68CA2D3EED3B3072D2 /* Overlap-Bridging-Header.h */,
 				E5E2D644A019FBE86AB4F2C6 /* OverlapApp.swift */,
 				9DC1354E4EC383D845FE2D7A /* PreviewPane.swift */,
+				385582827B8FB3942C356EE5 /* PrivacyView.swift */,
 				89A47F300D6D684652E8A861 /* QueryBar.swift */,
 				CDFD72BDB677E4DD2A8438F1 /* QuickLookController.swift */,
 				9C8E8108F1CA14CBFA3F0830 /* ResultsGridView.swift */,
@@ -178,6 +181,7 @@
 				08CD41961A3E1632DB0D4256 /* Models.swift in Sources */,
 				41569B206A51BC0ABE25BE60 /* OverlapApp.swift in Sources */,
 				07D0BDA5185A7D9769FF4E81 /* PreviewPane.swift in Sources */,
+				7121CEC02561332893D30898 /* PrivacyView.swift in Sources */,
 				44AF7A81E7208F108B82F633 /* QueryBar.swift in Sources */,
 				09926E3E73856F45B88ADD2A /* QuickLookController.swift in Sources */,
 				4160A953929876308C393B85 /* ResultsGridView.swift in Sources */,

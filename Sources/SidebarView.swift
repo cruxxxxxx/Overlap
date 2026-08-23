@@ -309,6 +309,24 @@ struct TagRow: View {
                 }
             }
             Divider()
+            Menu("Default in Queries") {
+                let cur = store.defaultStance(node.fullPath)
+                Button(cur == .off ? "✓ None" : "None") {
+                    store.setDefault(node.fullPath, .off)
+                }
+                Button(cur == .include ? "✓ Always Include" : "Always Include") {
+                    store.setDefault(node.fullPath, .include)
+                }
+                Button(cur == .exclude ? "✓ Always Exclude" : "Always Exclude") {
+                    store.setDefault(node.fullPath, .exclude)
+                }
+            }
+            if store.isHiddenTag(node.fullPath) {
+                Button("Unhide Tag") { store.setHidden(node.fullPath, false) }
+            } else {
+                Button("Hide Tag") { store.setHidden(node.fullPath, true) }
+            }
+            Divider()
             Button("New Subtag…") {
                 NotificationCenter.default.post(name: .tvNewSubtag, object: node)
             }
