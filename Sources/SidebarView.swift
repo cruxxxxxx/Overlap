@@ -30,6 +30,7 @@ struct SidebarView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(8)
+            .tutorialAnchor(.modePicker)
             Divider()
 
             if store.mode == .explore {
@@ -55,6 +56,7 @@ struct SidebarView: View {
                     }
                 }
                 .listStyle(.sidebar)
+                .tutorialAnchor(.sidebar)
             }
         }
         .sheet(item: $renaming) { node in renameSheet(node) }
@@ -165,8 +167,10 @@ struct SidebarView: View {
             }
             .disabled(store.taggedQueueCount == 0)
             .help("Move tagged items into the library folder")
+            .tutorialAnchor(.applyButton)
         }
         .padding(8)
+        .tutorialAnchor(.watchedFolders)
     }
 
     private func addFolder() {

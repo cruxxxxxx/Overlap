@@ -95,6 +95,7 @@ struct ResultsGridView: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
         }
+        .tutorialAnchor(.tagBar)
     }
 
     private var tagFieldPlaceholder: String {
@@ -276,6 +277,7 @@ struct ResultsGridView: View {
             .onChange(of: geo.size.width) { store.columnsHint = computeColumns($0) }
             .onChange(of: thumbSize) { _ in store.columnsHint = computeColumns(geo.size.width) }
         }
+        .tutorialAnchor(.grid)
     }
 
     private func computeColumns(_ width: CGFloat) -> Int {

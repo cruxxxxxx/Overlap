@@ -1072,14 +1072,24 @@ final class TagStore: ObservableObject {
 
     private func lowMoveToLibrary(_ urls: [URL]) -> [(from: URL, to: URL)] {
         let fm = FileManager.default
+        let scope = scopeURL.standardizedFileURL.path
+        func inLibrary(_ url: URL) -> Bool {
+            let p = url.standardizedFileURL.path
+            return p == scope || p.hasPrefix(scope + "/")
+        }
+        // Only import files that live OUTSIDE the library. A watched folder can
+        // be a subfolder of the library itself — those files are already in the
+        // library, so tagging is enough; moving them would flatten the tree.
         var moves: [(URL, URL)] = []
-        for url in urls {
+        for url in urls where !inLibrary(url) {
             let target = uniqueDestination(in: scopeURL, name: url.lastPathComponent)
             if (try? fm.moveItem(at: url, to: target)) != nil { moves.append((url, target)) }
         }
-        let movedIDs = Set(moves.map { $0.0.path })
-        queueItems.removeAll { movedIDs.contains($0.id) }
-        selection.subtract(movedIDs)
+        // Drop every applied item from the queue — the moved ones and the
+        // in-library ones (which stay put, now tagged).
+        let appliedIDs = Set(urls.map { $0.path })
+        queueItems.removeAll { appliedIDs.contains($0.id) }
+        selection.subtract(appliedIDs)
         refreshVisible()
         return moves
     }

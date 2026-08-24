@@ -22,6 +22,8 @@ targets:
       - Sources
       - path: Resources/Overlap.icns
         buildPhase: resources
+      - path: Resources/TutorialImages
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mike.overlap

@@ -11,12 +11,17 @@ struct OverlapApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            TutorialHost { ContentView() }
                 .environmentObject(store)
                 .frame(minWidth: 900, minHeight: 560)
         }
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .help) {
+                Button("Overlap Tutorial") {
+                    NotificationCenter.default.post(name: .overlapStartTutorial, object: nil)
+                }
+            }
         }
     }
 }
