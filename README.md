@@ -14,6 +14,12 @@
 
 Overlap reads and writes real macOS tags (`com.apple.metadata:_kMDItemUserTags`), so everything stays interoperable with Finder, Spotlight, and other tag tools — nothing is locked in a private database. It works on **any file type** (images, video, audio, PDFs, text, archives, even folders), not just photos.
 
+<div align="center">
+
+![Venn query demo](docs/demo-15fps.gif)
+
+</div>
+
 ## Screenshots
 
 | Explore — Venn query | Tags — grid + preview |
