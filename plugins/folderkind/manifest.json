@@ -1,0 +1,12 @@
+{
+  "name": "Folder & Neighbors",
+  "id": "com.overlap.folderkind",
+  "version": "1.0.0",
+  "protocolVersion": 1,
+  "exec": "folderkind",
+  "handles": ["*"],
+  "batch": true,
+  "wantsKnownTags": false,
+  "wantsLibrary": true,
+  "timeoutMs": 4000
+}
