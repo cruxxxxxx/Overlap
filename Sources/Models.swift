@@ -5,6 +5,15 @@ import UniformTypeIdentifiers
 /// Which left-column mode is active.
 enum LibraryMode { case tags, queue, explore }
 
+/// One section of the queue's "group by suggestions" view: a suggested tag and
+/// the (currently visible) files it covers. `suggestion == nil` is the trailing
+/// leftover section — visible queue files no plugin suggested anything for.
+struct SuggestionSection: Identifiable {
+    let suggestion: TagSuggestion?
+    let items: [FileItem]
+    var id: String { suggestion?.tag ?? "·ungrouped" }
+}
+
 /// How a diagram's included sets combine when no regions are painted.
 ///  - all:  item has every set (AND) — the default
 ///  - any:  item has at least one (OR)

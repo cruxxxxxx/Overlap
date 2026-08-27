@@ -10,7 +10,8 @@ struct ResultsGridView: View {
     @State private var pendingURLs: [URL] = []
     @State private var keyMonitor: Any?
     @State private var tagInput = ""
-    @State private var didSuggest = false
+    @State private var keepSuggestionsOnSelectionChange = false
+    @State private var showSuggestionSources = false
     @FocusState private var tagFieldFocused: Bool
 
     private var columns: [GridItem] {
@@ -25,11 +26,11 @@ struct ResultsGridView: View {
                 emptyState
             } else if store.showPreview {
                 HSplitView {
-                    grid.frame(minWidth: 220)
+                    currentGrid.frame(minWidth: 220)
                     PreviewPane(item: primarySelected).frame(minWidth: 260)
                 }
             } else {
-                grid
+                currentGrid
             }
             tagFooter
             quickTagBar
@@ -64,7 +65,7 @@ struct ResultsGridView: View {
 
     private var quickTagBar: some View {
         VStack(spacing: 0) {
-            if didSuggest {
+            if store.suggesting || !store.suggestions.isEmpty {
                 Divider()
                 suggestedRow
             }
@@ -88,6 +89,11 @@ struct ResultsGridView: View {
             Divider()
             HStack(spacing: 8) {
                 Image(systemName: "tag").foregroundStyle(.secondary)
+                Image(systemName: "sparkles")
+                    .foregroundStyle(store.autoSuggestEnabled ? Color.accentColor : Color.secondary)
+                    .contentShape(Rectangle())
+                    .onTapGesture { toggleAutoSuggest() }
+                    .help("Auto-suggest tags — tap to toggle")
                 TextField(tagFieldPlaceholder, text: $tagInput)
                     .textFieldStyle(.plain)
                     .focused($tagFieldFocused)
@@ -96,20 +102,14 @@ struct ResultsGridView: View {
                 if !store.selection.isEmpty {
                     Text("\(store.selection.count) selected")
                         .font(.caption).foregroundStyle(.secondary)
-                    Button { runSuggest() } label: {
-                        Image(systemName: "sparkles")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(store.suggesting)
-                    .help("Suggest tags for the selection")
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
         }
         .tutorialAnchor(.tagBar)
         .onChange(of: store.selection) { _ in
-            didSuggest = false
-            store.clearSuggestions()
+            if keepSuggestionsOnSelectionChange { return }
+            store.autoSuggestSelection()
         }
     }
 
@@ -117,37 +117,100 @@ struct ResultsGridView: View {
     private var suggestedRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                Image(systemName: "sparkles").font(.caption2).foregroundStyle(.secondary)
-                Text("Suggested").font(.caption).foregroundStyle(.secondary)
+                Button { showSuggestionSources.toggle() } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "sparkles").font(.caption2)
+                        Text("Suggested").font(.caption)
+                        Image(systemName: "chevron.down").font(.system(size: 7))
+                    }
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Suggestion sources — click to enable/disable plugins")
+                .popover(isPresented: $showSuggestionSources, arrowEdge: .top) {
+                    suggestionSourcesPopover
+                }
                 if store.suggesting {
                     ProgressView().controlSize(.small)
-                } else if store.suggestions.isEmpty {
-                    Text("none").font(.caption2).foregroundStyle(.tertiary)
+                    if let progress = store.suggestProgress, !progress.isEmpty {
+                        Text(progress).font(.caption).foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
                 ForEach(store.suggestions) { s in
-                    Button { applyTag(s.tag) } label: {
+                    Button { chipTapped(s) } label: {
                         HStack(spacing: 4) {
+                            if s.isGroup {
+                                Image(systemName: "person.crop.circle.badge.questionmark").font(.caption2)
+                            }
                             Text(s.tag).font(.caption)
-                            Text("\(Int(s.confidence * 100))%")
-                                .font(.caption2).foregroundStyle(.secondary)
+                            if s.paths.count != store.selection.count {
+                                Text("\(s.paths.count)")
+                                    .font(.caption2).fontWeight(.medium)
+                                    .padding(.horizontal, 4)
+                                    .background(Capsule().fill(Color.accentColor.opacity(0.25)))
+                            }
+                            if s.isGroup {
+                                Text("name…").font(.caption2).foregroundStyle(.secondary)
+                            } else {
+                                Text("\(Int(s.confidence * 100))%")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
                         }
                         .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
-                        .overlay(Capsule().stroke(Color.accentColor.opacity(0.4)))
+                        .background(Capsule().fill(Color.accentColor.opacity(s.isGroup ? 0.08 : 0.15)))
+                        .overlay(Capsule().stroke(Color.accentColor.opacity(s.isGroup ? 0.3 : 0.4),
+                                                  style: StrokeStyle(lineWidth: 1, dash: s.isGroup ? [3] : [])))
                     }
                     .buttonStyle(.plain)
-                    .help("\(s.source) · \(Int(s.confidence * 100))%")
+                    .help(s.isGroup
+                          ? "\(s.source) · \(s.paths.count) photos of one unnamed person · click to select them and name"
+                          : "\(s.source) · applies to \(s.paths.count) of \(store.selection.count) selected · ⌥-click selects those files")
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
         }
     }
 
-    private func runSuggest() {
-        let items = store.results.filter { store.selection.contains($0.id) }
-        guard !items.isEmpty else { return }
-        didSuggest = true
-        store.suggestTags(for: items)
+    /// Tap ✨: master on/off. On → suggestions repopulate for the current
+    /// selection; off → row collapses and no plugin runs until re-enabled.
+    private func toggleAutoSuggest() {
+        store.autoSuggestEnabled.toggle()
+        store.autoSuggestSelection()
+    }
+
+    /// The ✨ hold-popover: toggle individual suggestion sources (plugins).
+    /// Suggestions themselves populate automatically on selection change.
+    private var suggestionSourcesPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Suggestion sources").font(.caption).foregroundStyle(.secondary)
+            let plugins = PluginRegistry.discover()
+            if plugins.isEmpty {
+                Text("No plugins installed").font(.caption).foregroundStyle(.tertiary)
+            }
+            ForEach(plugins, id: \.id) { p in
+                Toggle(isOn: sourceEnabledBinding(p.id)) {
+                    Text(p.manifest.name)
+                }
+                .toggleStyle(.checkbox)
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 180, alignment: .leading)
+    }
+
+    private func sourceEnabledBinding(_ id: String) -> Binding<Bool> {
+        Binding {
+            !store.disabledPluginIDs.contains(id)
+        } set: { on in
+            if on {
+                store.disabledPluginIDs.remove(id)
+            } else {
+                store.disabledPluginIDs.insert(id)
+            }
+            store.autoSuggestSelection()
+        }
     }
 
     private var tagFieldPlaceholder: String {
@@ -183,6 +246,56 @@ struct ResultsGridView: View {
         store.addTag(tag, to: urls)
         tagInput = ""
         tagFieldFocused = true   // stay ready for the next tag
+    }
+
+    // MARK: Suggestion chips (cluster-aware)
+
+    /// Normal suggestion: click applies it to its member files; ⌥-click selects the
+    /// members first. Group handle (e.g. a face cluster): click selects the members
+    /// so they're visible and focuses the tag field pre-filled with the `person/`
+    /// namespace — you name the group instead of applying a placeholder tag.
+    private func chipTapped(_ s: TagSuggestion) {
+        if s.isGroup {
+            previewSuggestion(s)
+            tagInput = "person/"
+            tagFieldFocused = true
+            return
+        }
+        if NSEvent.modifierFlags.contains(.option) {
+            previewSuggestion(s)
+        } else {
+            applySuggestion(s)
+        }
+    }
+
+    /// Tag exactly the files the suggestion covers (`s.paths`), not the whole
+    /// selection — a clustering plugin's groups each cover a subset. The applied
+    /// chip is consumed; the rest stay so groups can be worked through in turn.
+    private func applySuggestion(_ s: TagSuggestion) {
+        guard !s.isGroup else { return }   // group handles are named, never applied literally
+        let urls = store.results.filter { s.paths.contains($0.id) }.map(\.url)
+        guard !urls.isEmpty else { return }
+        withSuggestionsKept {
+            store.addTag(s.tag, to: urls)
+            store.consumeSuggestion(s.tag)
+        }
+    }
+
+    /// Select the suggestion's member files so the user can eyeball the group
+    /// (and rename via the tag field) before committing.
+    private func previewSuggestion(_ s: TagSuggestion) {
+        let ids = Set(store.results.map(\.id)).intersection(s.paths)
+        guard !ids.isEmpty else { return }
+        withSuggestionsKept { store.selection = ids }
+    }
+
+    /// Run a store mutation without the selection-change handler wiping the
+    /// suggestion chips; the flag resets on the next runloop turn, after any
+    /// resulting `onChange` has fired.
+    private func withSuggestionsKept(_ mutate: () -> Void) {
+        keepSuggestionsOnSelectionChange = true
+        mutate()
+        DispatchQueue.main.async { keepSuggestionsOnSelectionChange = false }
     }
 
     /// Space bar opens Quick Look — but only when the user isn't typing in a
@@ -301,6 +414,17 @@ struct ResultsGridView: View {
 
     // MARK: Grid
 
+    /// Flat grid normally; the sectioned "group by suggestions" grid when it's
+    /// active in queue mode and has sections. A cold first run (still indexing)
+    /// falls through to the flat grid so the queue never disappears.
+    @ViewBuilder private var currentGrid: some View {
+        if store.mode == .queue && store.queueGrouping && !store.queueSections.isEmpty {
+            groupedGrid
+        } else {
+            grid
+        }
+    }
+
     private var grid: some View {
         GeometryReader { geo in
             ScrollViewReader { proxy in
@@ -337,6 +461,104 @@ struct ResultsGridView: View {
         max(1, Int((width - 14) / (thumbSize + 22)))
     }
 
+    // MARK: Grouped-by-suggestions grid (queue)
+
+    @State private var collapsedSections: Set<String> = []
+
+    /// Photos-style sections: one per suggested tag, its member thumbnails
+    /// together under a pinned header. A file suggested for several tags appears
+    /// in each section (selection is by file id, so every copy highlights).
+    private var groupedGrid: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
+                ForEach(store.queueSections) { section in
+                    Section(header: sectionHeader(section)) {
+                        if !collapsedSections.contains(section.id) {
+                            LazyVGrid(columns: columns, spacing: 12) {
+                                ForEach(section.items) { item in
+                                    ThumbnailCell(item: item, size: thumbSize,
+                                                  selected: store.selection.contains(item.id))
+                                        .id("\(section.id)|\(item.id)")   // compound: same file may repeat
+                                        .onTapGesture(count: 2) { handleOpen(item) }
+                                        .onTapGesture { handleClick(item, within: section.items) }
+                                        .onDrag { NSItemProvider(object: item.url as NSURL) }
+                                        .contextMenu { contextMenu(for: item) }
+                                }
+                            }
+                            .padding(.horizontal, 12).padding(.bottom, 16)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 4)
+        }
+        .tutorialAnchor(.grid)
+    }
+
+    private func sectionHeader(_ section: SuggestionSection) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                if collapsedSections.contains(section.id) { collapsedSections.remove(section.id) }
+                else { collapsedSections.insert(section.id) }
+            } label: {
+                Image(systemName: collapsedSections.contains(section.id) ? "chevron.right" : "chevron.down")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+
+            if let s = section.suggestion {
+                if s.isGroup {
+                    Image(systemName: "person.crop.circle").foregroundStyle(.secondary)
+                }
+                Text(s.tag).fontWeight(.semibold)
+                Text("\(section.items.count)").foregroundStyle(.secondary)
+                Text("\(Int(s.confidence * 100))% · \(s.source)")
+                    .font(.caption).foregroundStyle(.tertiary)
+                Spacer()
+                Button("Select All") { selectSection(section) }
+                    .buttonStyle(.borderless).font(.caption)
+                if s.isGroup {
+                    Button("Name…") { nameSection(section) }
+                        .buttonStyle(.borderless).font(.caption)
+                        .help("Select these photos and type the person's name")
+                } else {
+                    Button("Apply All") { applySection(section) }
+                        .buttonStyle(.borderless).font(.caption)
+                        .help("Tag every photo in this group “\(s.tag)”")
+                }
+            } else {
+                Image(systemName: "questionmark.square.dashed").foregroundStyle(.tertiary)
+                Text("No suggestions").fontWeight(.semibold).foregroundStyle(.secondary)
+                Text("\(section.items.count)").foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(.bar)
+    }
+
+    private func selectSection(_ section: SuggestionSection) {
+        store.selection = Set(section.items.map(\.id))
+        store.selectionAnchor = section.items.first?.id
+    }
+
+    private func applySection(_ section: SuggestionSection) {
+        guard let s = section.suggestion, !s.isGroup else { return }
+        let urls = section.items.map(\.url)
+        guard !urls.isEmpty else { return }
+        store.addTag(s.tag, to: urls)
+        store.consumeQueueSuggestion(s.tag)
+    }
+
+    /// Face groups aren't applied literally — select the members so the user can
+    /// see who they are, and focus the tag field prefilled with the person
+    /// namespace. Applying `person/<name>` is what teaches the face plugin.
+    private func nameSection(_ section: SuggestionSection) {
+        selectSection(section)
+        tagInput = "person/"
+        tagFieldFocused = true
+    }
+
     private var queueBar: some View {
         HStack(spacing: 12) {
             Image(systemName: "tray.and.arrow.down")
@@ -349,6 +571,26 @@ struct ResultsGridView: View {
             TypeFilterMenu(queue: true)
             TypeFilterChips()
             Spacer()
+            // Group-by-suggestions toggle + its live progress / refresh.
+            if store.queueSuggesting {
+                ProgressView().controlSize(.small)
+                if let p = store.queueSuggestProgress {
+                    Text(p).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Toggle(isOn: Binding(get: { store.queueGrouping },
+                                 set: { store.setQueueGrouping($0) })) {
+                Label("Group", systemImage: "sparkles.rectangle.stack")
+            }
+            .toggleStyle(.button)
+            .help("Group the queue by suggested tags (faces, similar images)")
+            if store.queueGrouping {
+                Button { store.suggestQueue() } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(store.queueSuggesting)
+                .help("Re-run suggestions over the queue")
+            }
             SortMenu()
             Slider(value: $thumbSize, in: 90...280).frame(width: 120)
             Button { store.applyQueue() } label: {
@@ -398,11 +640,13 @@ struct ResultsGridView: View {
 
     // MARK: Interaction
 
-    private func handleClick(_ item: FileItem) {
+    /// `within` scopes shift-click ranges (e.g. to one suggestion section);
+    /// defaults to the flat results order.
+    private func handleClick(_ item: FileItem, within scope: [FileItem]? = nil) {
         // Drop focus from the sidebar search field so Space/arrows target the grid.
         NSApp.keyWindow?.makeFirstResponder(nil)
         let flags = NSEvent.modifierFlags
-        let items = store.results
+        let items = scope ?? store.results
         guard let clicked = items.firstIndex(where: { $0.id == item.id }) else { return }
 
         if flags.contains(.shift),
