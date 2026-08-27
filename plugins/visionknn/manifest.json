@@ -1,0 +1,12 @@
+{
+  "name": "Visual Neighbors",
+  "id": "com.overlap.visionknn",
+  "version": "1.0.0",
+  "protocolVersion": 1,
+  "exec": "visionknn",
+  "handles": ["image"],
+  "batch": true,
+  "wantsKnownTags": false,
+  "wantsLibrary": true,
+  "timeoutMs": 20000
+}

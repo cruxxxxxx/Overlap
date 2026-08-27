@@ -23,7 +23,11 @@ is how to write your own.
 4. You write a JSON **response** to **stdout** and exit `0`.
 
 5. Overlap merges every plugin's suggestions, ranks them by confidence, and shows
-   them as tap-to-apply chips.
+   them as tap-to-apply chips. A chip applies its tag to **only the files it
+   covers** (the paths you suggested it for), so a clustering plugin can return
+   several disjoint groups over one selection — each group becomes its own chip
+   with a member-count badge. ⌥-click a chip to select just its members in the
+   grid before committing.
 
 A crash, non-zero exit, timeout, or malformed output is ignored — one bad plugin
 never blocks the others or the app.
@@ -114,19 +118,26 @@ tags. The intended pattern: **embed** those files, **cluster** or nearest-
 neighbor the target against them, and suggest the tags its closest matches carry.
 Cache your embeddings by `path` + `modDate` so you only re-embed what changed.
 
-This is how a future Apple Vision + clustering plugin drops in with **zero app
-changes**.
+`plugins/visionknn/` is exactly this, for real: Apple Vision FeaturePrint
+embeddings + cosine kNN over the library, with an on-disk embedding cache. It drops
+in with **zero app changes**.
 
 ---
 
-## Reference plugin
+## Bundled plugins
 
-`plugins/folderkind/` is a tiny, dependency-free Swift plugin: it suggests the
-parent folder name, the file kind, and the most common tags among library files
-in the same folder/kind. Build and install it:
+| plugin | what it does | library? |
+|---|---|---|
+| `plugins/folderkind/` | folder name + file kind + neighbor tags — dependency-free template | yes |
+| `plugins/mockcluster/` | deterministic fake clusters — exercises the group-chip UX with no ML | no |
+| `plugins/visionknn/` | Apple Vision FeaturePrint kNN over the tagged library (real similarity) | yes |
+| `plugins/facecluster/` | Apple Vision faceprints → "Person N" group chips (real clustering) | no |
+
+Build and install all of them:
 
 ```sh
 bash plugins/install.sh
 ```
 
-Read its `main.swift` as a starting template.
+Read `folderkind/main.swift` as a starting template; `visionknn` and `facecluster`
+show the real embed/cluster patterns with Apple Vision.
