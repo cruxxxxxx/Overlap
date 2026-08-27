@@ -4,22 +4,23 @@ import Accelerate
 
 // Overlap "Face Groups" plugin.
 //
-// Two behaviors over the selected images, both on-device (Apple Vision faceprints,
-// 128-d, via the ObjC runtime — the embedding request isn't in the public Swift API):
+// Builds a PERSISTENT identity clustering over every face in the library and
+// suggests a stable identity tag for each selected photo:
 //
-//  1. MATCH — a selected face that resembles a person you've already named (any
-//     library image carrying a `person/<name>` tag) yields a normal single-click
-//     suggestion of that `person/<name>` tag. This is how newly added photos of a
-//     known person get auto-labeled.
+//  • Every face is embedded (Apple Vision faceprint, 128-d, on-device) and assigned
+//    to a stable cluster. Cluster N is the same person across runs.
+//  • A cluster's NAME is learned from the tags its photos already carry: the tag
+//    most *concentrated* in this cluster (a person name like "Alex" sits on one
+//    person's photos; a category like "Fashion" is spread across everyone, so it's
+//    ignored). Until you name it, the cluster is just "Person N".
+//  • Selecting a photo suggests its people's tags — click to apply. Rename
+//    "Person 3" → "Alex" with the app's normal tag rename and every photo updates;
+//    next run the plugin sees "Alex" concentrated in cluster 3 and adopts it, so new
+//    photos of that person suggest "Alex". Over-split (one person in two clusters)
+//    self-heals once you rename both to the same name.
 //
-//  2. GROUP — faces that match nobody are clustered among the selection and emitted
-//     as `group: true` "Person N" handles. These are NOT tags to apply: the host
-//     turns them into select-the-members-then-name affordances. Naming writes a real
-//     `person/<name>` tag, which this plugin then learns for next time.
-//
-// A persistent, memory-mapped faceprint index (faces.bin + meta.json) means only
-// new/changed images are re-embedded. Fully local; if the private request is
-// unavailable the plugin returns no suggestions rather than failing.
+// The face-embedding request isn't in the public Swift API, so it's reached via the
+// ObjC runtime. Fully local; unavailable request → no suggestions, never a crash.
 //
 // The contract IS the JSON — structs mirror Sources/PluginContract.swift.
 
@@ -43,7 +44,6 @@ struct SuggestRequest: Codable {
 struct RawSuggestion: Codable {
     let path: String; let tag: String
     let confidence: Double; let source: String?
-    var group: Bool? = nil     // true = a cluster handle to name, not a tag to apply
 }
 struct SuggestResponse: Codable {
     let protocolVersion: Int
@@ -52,27 +52,22 @@ struct SuggestResponse: Codable {
 
 // MARK: - Tunables
 
-let PERSON_PREFIX = "person/"   // namespace that marks a face identity
-let MATCH_THRESHOLD: Float = 0.84   // cosine to accept a target face as a known person
-let JOIN_THRESHOLD: Float = 0.84    // cosine to join two unmatched faces into one group
-let MAX_GROUPS = 12
+let JOIN_THRESHOLD: Float = 0.84    // cosine to join a face to an existing cluster
+let NAME_MIN_SHARE = 0.5            // a name tag must be on ≥ this fraction of a cluster
+let NAME_MIN_CONCENTRATION = 0.6    // …and ≥ this fraction of all its uses are in-cluster
 let SOURCE = "facecluster"
 
 // MARK: - Faceprint extraction (private Vision API via ObjC runtime)
 
-struct FoundFace { let vec: [Float]; let bbox: [Double] }
-
-/// One L2-normalized 128-d faceprint per detected face (+ its normalized bbox), or
-/// [] if the file can't be read or the private request is unavailable.
-func faceprints(_ path: String) -> [FoundFace] {
+/// L2-normalized 128-d faceprints for every detected face, or [] on failure.
+func faceprints(_ path: String) -> [[Float]] {
     guard let cls = NSClassFromString("VNCreateFaceprintRequest") as? NSObject.Type else { return [] }
     let request = cls.init()
     guard let visionRequest = request as? VNRequest else { return [] }
     let handler = VNImageRequestHandler(url: URL(fileURLWithPath: path), options: [:])
     do { try handler.perform([visionRequest]) } catch { return [] }
     guard let faces = visionRequest.results as? [VNFaceObservation] else { return [] }
-
-    var out: [FoundFace] = []
+    var out: [[Float]] = []
     for obs in faces {
         guard let fp = obs.value(forKey: "faceprint") as? NSObject,
               let count = fp.value(forKey: "elementCount") as? Int,
@@ -86,17 +81,18 @@ func faceprints(_ path: String) -> [FoundFace] {
         var norm: Float = 0
         vDSP_svesq(vec, 1, &norm, vDSP_Length(count)); norm = norm.squareRoot()
         if norm > 0 { var inv = 1 / norm; vDSP_vsmul(vec, 1, &inv, &vec, 1, vDSP_Length(count)) }
-        let b = obs.boundingBox
-        out.append(FoundFace(vec: vec, bbox: [b.origin.x, b.origin.y, b.size.width, b.size.height]))
+        out.append(vec)
     }
     return out
 }
 
-func dot(_ a: UnsafePointer<Float>, _ b: UnsafePointer<Float>, _ n: Int) -> Float {
-    var d: Float = 0; vDSP_dotpr(a, 1, b, 1, &d, vDSP_Length(n)); return d
+func cosine(_ a: [Float], _ b: [Float]) -> Float {
+    var d: Float = 0
+    a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in
+        vDSP_dotpr(pa.baseAddress!, 1, pb.baseAddress!, 1, &d, vDSP_Length(a.count)) } }
+    return d
 }
 
-/// mtime fingerprint (host-supplied modDate → no stat on the hot path).
 func signature(path: String, modDate: Date?) -> String {
     if let m = modDate { return "m:\(Int(m.timeIntervalSince1970))" }
     let mtime = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)?
@@ -104,62 +100,106 @@ func signature(path: String, modDate: Date?) -> String {
     return "s:\(Int(mtime))"
 }
 
-// MARK: - Persistent mmap faceprint index
+// MARK: - Persistent state (meta.json)
 
-struct FaceRow: Codable { var row: Int; var bbox: [Double] }
-// `tags` is persisted so identity labels (person/<name>) survive when the host sends
-// an empty library on unchanged clicks — the index is the source of truth.
-struct ImageEntry: Codable { var sig: String; var faces: [FaceRow]; var tags: [String] }
-struct Meta: Codable { var dim: Int; var images: [String: ImageEntry] }
+struct FaceCluster: Codable { var vec: [Float]; var cluster: Int }
+struct ImageEntry: Codable { var sig: String; var faces: [FaceCluster]; var tags: [String] }
+struct ClusterState: Codable { var sum: [Float]; var count: Int }
+struct Meta: Codable {
+    var dim: Int = 0
+    var images: [String: ImageEntry] = [:]
+    var clusters: [Int: ClusterState] = [:]
+    var nextCluster: Int = 1
+}
 
-let indexDir: URL = {
+let metaURL: URL = {
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Overlap/PluginCache/facecluster", isDirectory: true)
     try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-    return base
+    return base.appendingPathComponent("meta.json")
 }()
-let binURL = indexDir.appendingPathComponent("faces.bin")
-let metaURL = indexDir.appendingPathComponent("meta.json")
-
 var meta: Meta = {
     guard let d = try? Data(contentsOf: metaURL),
-          let m = try? JSONDecoder().decode(Meta.self, from: d) else { return Meta(dim: 0, images: [:]) }
+          let m = try? JSONDecoder().decode(Meta.self, from: d) else { return Meta() }
     return m
 }()
 func saveMeta() { if let d = try? JSONEncoder().encode(meta) { try? d.write(to: metaURL) } }
 
-/// Ensure faceprints for `items` are in the index; append rows for new/changed
-/// images (old rows orphaned — harmless). Progress on stderr.
-func syncIndex(items: [(path: String, modDate: Date?, tags: [String])], progress: (Int, Int) -> Void) {
-    if !FileManager.default.fileExists(atPath: binURL.path) {
-        FileManager.default.createFile(atPath: binURL.path, contents: nil)
+func centroid(_ c: ClusterState) -> [Float] {
+    var n: Float = 0; vDSP_svesq(c.sum, 1, &n, vDSP_Length(c.sum.count)); n = n.squareRoot()
+    return n > 0 ? c.sum.map { $0 / n } : c.sum
+}
+
+/// Assign a face vector to the nearest cluster (or a new one) and update centroid.
+func assign(_ vec: [Float]) -> Int {
+    var best = -1; var bestSim = JOIN_THRESHOLD
+    for (id, c) in meta.clusters {
+        let s = cosine(vec, centroid(c))
+        if s >= bestSim { bestSim = s; best = id }
     }
-    guard let fh = try? FileHandle(forUpdating: binURL) else { return }
-    defer { try? fh.close() }
+    if best == -1 {
+        best = meta.nextCluster; meta.nextCluster += 1
+        meta.clusters[best] = ClusterState(sum: vec, count: 1)
+    } else {
+        var c = meta.clusters[best]!
+        for i in 0..<c.sum.count { c.sum[i] += vec[i] }; c.count += 1
+        meta.clusters[best] = c
+    }
+    return best
+}
+
+/// Bring the index up to date: embed new/changed images' faces and cluster them;
+/// refresh tags for everything (labels are learned from tags).
+func syncIndex(items: [(path: String, modDate: Date?, tags: [String])], progress: (Int, Int) -> Void) {
     let todo = items.filter { meta.images[$0.path]?.sig != signature(path: $0.path, modDate: $0.modDate) }
     var done = 0
     for it in items {
         let sig = signature(path: it.path, modDate: it.modDate)
-        // Faces unchanged: just refresh persisted tags (labels) if they changed.
         if let e = meta.images[it.path], e.sig == sig {
             if e.tags != it.tags { meta.images[it.path]?.tags = it.tags }
             continue
         }
         let faces = faceprints(it.path)
-        if meta.dim == 0, let f = faces.first { meta.dim = f.vec.count }
-        var rows: [FaceRow] = []
-        if meta.dim > 0 {
-            for f in faces where f.vec.count == meta.dim {
-                let row = Int((try? fh.seekToEnd()) ?? 0) / (meta.dim * 4)
-                fh.write(f.vec.withUnsafeBytes { Data($0) })
-                rows.append(FaceRow(row: row, bbox: f.bbox))
-            }
+        if meta.dim == 0, let f = faces.first { meta.dim = f.count }
+        var assigned: [FaceCluster] = []
+        for f in faces where f.count == meta.dim {
+            assigned.append(FaceCluster(vec: f, cluster: assign(f)))
         }
-        meta.images[it.path] = ImageEntry(sig: sig, faces: rows, tags: it.tags)
+        meta.images[it.path] = ImageEntry(sig: sig, faces: assigned, tags: it.tags)
         done += 1
         if done % 25 == 0 { saveMeta(); progress(done, todo.count) }
     }
-    if done > 0 { saveMeta() }
+    if todo.count > 0 { saveMeta() }
+}
+
+/// Learn each cluster's display name from the tags its member images carry: the tag
+/// most concentrated in the cluster (person-like), else "Person <id>".
+func clusterNames() -> [Int: String] {
+    // How many images (total) carry each tag, and how many per cluster.
+    var globalTagCount: [String: Int] = [:]
+    var clusterTagCount: [Int: [String: Int]] = [:]
+    var clusterSize: [Int: Int] = [:]
+    for (_, entry) in meta.images {
+        let clustersHere = Set(entry.faces.map { $0.cluster })
+        for c in clustersHere { clusterSize[c, default: 0] += 1 }
+        for tag in Set(entry.tags) {
+            globalTagCount[tag, default: 0] += 1
+            for c in clustersHere { clusterTagCount[c, default: [:]][tag, default: 0] += 1 }
+        }
+    }
+    var names: [Int: String] = [:]
+    for (c, size) in clusterSize {
+        var bestTag: String? = nil; var bestScore = 0
+        for (tag, inC) in clusterTagCount[c] ?? [:] {
+            let share = Double(inC) / Double(max(1, size))
+            let concentration = Double(inC) / Double(max(1, globalTagCount[tag] ?? 1))
+            if share >= NAME_MIN_SHARE, concentration >= NAME_MIN_CONCENTRATION, inC > bestScore {
+                bestScore = inC; bestTag = tag
+            }
+        }
+        names[c] = bestTag ?? "Person \(c)"
+    }
+    return names
 }
 
 // MARK: - Main
@@ -171,94 +211,28 @@ guard let req = try? decoder.decode(SuggestRequest.self, from: input) else {
     exit(1)
 }
 
-let library = req.library ?? []
-
-// Index every library + target image (faceprints for new/changed; tags always
-// refreshed). Tags are persisted so labels survive an empty-library click.
-var need: [(path: String, modDate: Date?, tags: [String])] = library.map { ($0.path, $0.modDate, $0.tags) }
-need.append(contentsOf: req.files.map { ($0.path, $0.modDate, $0.tags) })
+// Dedupe library + targets by path (a selected file appears in both) and union
+// their tags, so a target's copy can't clobber the library's authoritative tags.
+var modByPath: [String: Date?] = [:]
+var tagsByPath: [String: Set<String>] = [:]
+for it in (req.library ?? []) { modByPath[it.path] = it.modDate; tagsByPath[it.path, default: []].formUnion(it.tags) }
+for f in req.files { modByPath[f.path] = f.modDate; tagsByPath[f.path, default: []].formUnion(f.tags) }
+let need = tagsByPath.map { (path: $0.key, modDate: modByPath[$0.key] ?? nil, tags: Array($0.value)) }
 syncIndex(items: need) { done, total in
     FileHandle.standardError.write(Data("Building face index… \(done)/\(total)\n".utf8))
 }
 
-let dim = meta.dim
+let names = clusterNames()
 var out: [RawSuggestion] = []
-
-if dim > 0, let fh = try? FileHandle(forReadingFrom: binURL) {
-    let fd = fh.fileDescriptor
-    let size = Int(lseek(fd, 0, SEEK_END))
-    if size >= dim * 4, let raw = mmap(nil, size, PROT_READ, MAP_PRIVATE, fd, 0), raw != MAP_FAILED {
-        let base = raw.assumingMemoryBound(to: Float.self)
-        func rowPtr(_ r: Int) -> UnsafePointer<Float> { UnsafePointer(base).advanced(by: r * dim) }
-
-        // Labeled faces come from the PERSISTED index (works on empty-library clicks):
-        // an image with exactly one person/<name> tag anchors that identity for each
-        // of its faces. (One person tag avoids the ambiguity of which face maps to
-        // which name in a group photo.)
-        var labeled: [(row: Int, name: String)] = []
-        for (_, entry) in meta.images {
-            let people = entry.tags.filter { $0.hasPrefix(PERSON_PREFIX) }
-            guard people.count == 1 else { continue }
-            for f in entry.faces { labeled.append((f.row, people[0])) }
-        }
-
-        // For each selected image, match or collect its faces.
-        struct Unmatched { let path: String; let row: Int }
-        var unmatched: [Unmatched] = []
-        var perFileMatched = Set<String>()   // path\u{1}tag already emitted
-
-        for file in req.files {
-            guard let entry = meta.images[file.path] else { continue }
-            let own = Set(file.tags)
-            for f in entry.faces {
-                let tv = rowPtr(f.row)
-                var best: (name: String, sim: Float)? = nil
-                for l in labeled {
-                    let s = dot(tv, rowPtr(l.row), dim)
-                    if s >= MATCH_THRESHOLD, s > (best?.sim ?? MATCH_THRESHOLD) { best = (l.name, s) }
-                }
-                if let b = best {
-                    let key = file.path + "\u{1}" + b.name
-                    if !own.contains(b.name), !perFileMatched.contains(key) {
-                        perFileMatched.insert(key)
-                        out.append(RawSuggestion(path: file.path, tag: b.name,
-                                                 confidence: Double(b.sim), source: SOURCE, group: false))
-                    }
-                } else {
-                    unmatched.append(Unmatched(path: file.path, row: f.row))
-                }
-            }
-        }
-
-        // Cluster the leftover (nobody-matched) faces → "Person N" group handles.
-        final class Cluster { var sum: [Float]; var cent: [Float]; var paths: [String] = []
-            init(_ v: [Float], _ p: String) { sum = v; cent = v; paths = [p] }
-            func add(_ v: [Float], _ p: String) {
-                paths.append(p); for i in 0..<sum.count { sum[i] += v[i] }
-                var n: Float = 0; vDSP_svesq(sum, 1, &n, vDSP_Length(sum.count)); n = n.squareRoot()
-                cent = n > 0 ? sum.map { $0 / n } : sum
-            }
-        }
-        var clusters: [Cluster] = []
-        for u in unmatched {
-            let v = Array(UnsafeBufferPointer(start: rowPtr(u.row), count: dim))
-            var best: Cluster? = nil; var bestSim = JOIN_THRESHOLD
-            for c in clusters { let s = dot(v, c.cent, dim); if s >= bestSim { bestSim = s; best = c } }
-            if let b = best { b.add(v, u.path) } else { clusters.append(Cluster(v, u.path)) }
-        }
-        let ranked = clusters
-            .sorted { Set($0.paths).count > Set($1.paths).count }
-            .prefix(MAX_GROUPS)
-        // Neutral, obviously-a-placeholder label — never a fake identity. The tag is
-        // only an internal handle; the host shows it as a "group to name", and naming
-        // replaces it with a real person/<name>. It is never applied as-is.
-        for (i, c) in ranked.enumerated() {
-            let tag = "Group \(i + 1)"
-            for p in Set(c.paths) {
-                out.append(RawSuggestion(path: p, tag: tag, confidence: 0.6, source: SOURCE, group: true))
-            }
-        }
-        munmap(raw, size)
+for file in req.files {
+    guard let entry = meta.images[file.path] else { continue }
+    let own = Set(file.tags)
+    var seen = Set<String>()
+    for face in entry.faces {
+        guard let name = names[face.cluster], !own.contains(name), !seen.contains(name) else { continue }
+        seen.insert(name)
+        let conf = max(0, min(1, Double(cosine(face.vec, centroid(meta.clusters[face.cluster]!)))))
+        out.append(RawSuggestion(path: file.path, tag: name, confidence: conf, source: SOURCE))
     }
 }
 
@@ -266,7 +240,3 @@ let encoder = JSONEncoder()
 let resp = SuggestResponse(protocolVersion: 1, suggestions: out)
 FileHandle.standardOutput.write((try? encoder.encode(resp))
     ?? Data("{\"protocolVersion\":1,\"suggestions\":[]}".utf8))
-
-func dot(_ a: [Float], _ b: [Float], _ n: Int) -> Float {
-    a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in dot(pa.baseAddress!, pb.baseAddress!, n) } }
-}
