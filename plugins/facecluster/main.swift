@@ -249,8 +249,11 @@ if dim > 0, let fh = try? FileHandle(forReadingFrom: binURL) {
         let ranked = clusters
             .sorted { Set($0.paths).count > Set($1.paths).count }
             .prefix(MAX_GROUPS)
+        // Neutral, obviously-a-placeholder label — never a fake identity. The tag is
+        // only an internal handle; the host shows it as a "group to name", and naming
+        // replaces it with a real person/<name>. It is never applied as-is.
         for (i, c) in ranked.enumerated() {
-            let tag = "Person \(i + 1)"
+            let tag = "Group \(i + 1)"
             for p in Set(c.paths) {
                 out.append(RawSuggestion(path: p, tag: tag, confidence: 0.6, source: SOURCE, group: true))
             }
