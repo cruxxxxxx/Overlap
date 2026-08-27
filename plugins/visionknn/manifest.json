@@ -8,5 +8,5 @@
   "batch": true,
   "wantsKnownTags": false,
   "wantsLibrary": true,
-  "timeoutMs": 20000
+  "timeoutMs": 120000
 }

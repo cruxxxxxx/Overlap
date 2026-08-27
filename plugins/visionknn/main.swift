@@ -109,19 +109,26 @@ var cache: [String: CacheEntry] = {
     return map
 }()
 
+func saveCache() {
+    if let data = try? JSONEncoder().encode(cache) {
+        try? data.write(to: cacheURL())
+    }
+}
+
+// Persist partway through a big cold library embed so a timeout/kill keeps the
+// work done so far — the next run resumes instead of starting over.
+var freshCount = 0
+let SAVE_EVERY = 300
+
 /// Embed via cache; returns nil on unreadable files.
 func embedCached(path: String, modDate: Date?) -> [Float]? {
     let sig = signature(path: path, modDate: modDate)
     if let hit = cache[path], hit.sig == sig { return hit.vec }
     guard let vec = embed(path) else { return nil }
     cache[path] = CacheEntry(sig: sig, vec: vec)
+    freshCount += 1
+    if freshCount % SAVE_EVERY == 0 { saveCache() }
     return vec
-}
-
-func saveCache() {
-    if let data = try? JSONEncoder().encode(cache) {
-        try? data.write(to: cacheURL())
-    }
 }
 
 // MARK: - Main
