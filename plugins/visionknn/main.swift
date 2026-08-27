@@ -84,7 +84,11 @@ func signature(path: String, modDate: Date?) -> String {
 
 // MARK: - On-disk mmap index (index.bin + meta.json)
 
-struct Entry: Codable { var row: Int; var sig: String }
+// Each embedded image: its row in index.bin, a change-signature, and its tags.
+// Persisting tags here makes the plugin the source of truth for the corpus, so the
+// host only re-sends the library when it actually changed (see the empty-library
+// fast path in main) — no multi-MB pipe on every click.
+struct Entry: Codable { var row: Int; var sig: String; var tags: [String] }
 struct Meta: Codable { var dim: Int; var entries: [String: Entry] }
 
 let indexDir: URL = {
@@ -106,20 +110,29 @@ func saveMeta() {
     if let d = try? JSONEncoder().encode(meta) { try? d.write(to: metaURL) }
 }
 
-/// Ensure every path has a current row in index.bin, embedding what's new/changed.
-/// Writes rows in place (reused path) or appended (new). `progress` is called with
-/// (done, total) as fresh embeds happen. Returns false if the index is unusable.
-func buildIndex(paths: [(path: String, modDate: Date?)], progress: (Int, Int) -> Void) {
+struct SyncItem { let path: String; let modDate: Date?; let tags: [String] }
+
+/// Bring the index up to date for the given items: embed new/changed files (row
+/// appended or overwritten in place) and record each item's tags. Vectors already
+/// current are left alone; only their tags are refreshed if they changed. This is
+/// how the persisted corpus stays authoritative without the host re-sending it.
+func syncIndex(items: [SyncItem], progress: (Int, Int) -> Void) {
     if !FileManager.default.fileExists(atPath: binURL.path) {
         FileManager.default.createFile(atPath: binURL.path, contents: nil)
     }
     guard let fh = try? FileHandle(forUpdating: binURL) else { return }
     defer { try? fh.close() }
 
-    let toEmbed = paths.filter { meta.entries[$0.path]?.sig != signature(path: $0.path, modDate: $0.modDate) }
+    let toEmbed = items.filter { meta.entries[$0.path]?.sig != signature(path: $0.path, modDate: $0.modDate) }
     var fresh = 0
-    for (p, mod) in toEmbed {
-        guard let vec = embed(p) else { continue }
+    for it in items {
+        let sig = signature(path: it.path, modDate: it.modDate)
+        // Vector already current: just refresh tags if they changed, no embed.
+        if let e = meta.entries[it.path], e.sig == sig {
+            if e.tags != it.tags { meta.entries[it.path] = Entry(row: e.row, sig: sig, tags: it.tags) }
+            continue
+        }
+        guard let vec = embed(it.path) else { continue }
 
         // First-ever vector sets the dimension; a dimension change (OS/model
         // revision) invalidates the whole blob — rebuild from scratch.
@@ -128,12 +141,11 @@ func buildIndex(paths: [(path: String, modDate: Date?)], progress: (Int, Int) ->
             try? fh.truncate(atOffset: 0); meta = Meta(dim: vec.count, entries: [:])
         }
 
-        let sig = signature(path: p, modDate: mod)
         let bytesPerRow = meta.dim * 4
-        let row = meta.entries[p]?.row ?? (Int((try? fh.seekToEnd()) ?? 0) / bytesPerRow)
+        let row = meta.entries[it.path]?.row ?? (Int((try? fh.seekToEnd()) ?? 0) / bytesPerRow)
         try? fh.seek(toOffset: UInt64(row * bytesPerRow))
         fh.write(vec.withUnsafeBytes { Data($0) })
-        meta.entries[p] = Entry(row: row, sig: sig)
+        meta.entries[it.path] = Entry(row: row, sig: sig, tags: it.tags)
 
         fresh += 1
         if fresh % 25 == 0 { saveMeta(); progress(fresh, toEmbed.count) }
@@ -150,12 +162,13 @@ guard let req = try? decoder.decode(SuggestRequest.self, from: input) else {
     exit(1)
 }
 
-let library = (req.library ?? []).filter { !$0.tags.isEmpty }
-
-// Embed every library + target path that's new or changed (progress on stderr).
-var need: [(path: String, modDate: Date?)] = library.map { ($0.path, $0.modDate) }
-need.append(contentsOf: req.files.map { ($0.path, $0.modDate) })
-buildIndex(paths: need) { done, total in
+// Sync the corpus. The host sends `library` only when it changed (otherwise an
+// empty list — the persisted index is authoritative), plus always the targets so a
+// freshly-selected untagged file gets embedded. Tags are recorded here so queries
+// don't need the host to re-send the library each click.
+var items = (req.library ?? []).map { SyncItem(path: $0.path, modDate: $0.modDate, tags: $0.tags) }
+items.append(contentsOf: req.files.map { SyncItem(path: $0.path, modDate: $0.modDate, tags: $0.tags) })
+syncIndex(items: items) { done, total in
     FileHandle.standardError.write(Data("Building suggestion index… \(done)/\(total)\n".utf8))
 }
 
@@ -169,10 +182,10 @@ if dim > 0, let fh = try? FileHandle(forReadingFrom: binURL) {
         let base = raw.assumingMemoryBound(to: Float.self)
         func rowPtr(_ r: Int) -> UnsafePointer<Float> { UnsafePointer(base).advanced(by: r * dim) }
 
-        // Library rows to score against (path present in the index).
-        let refs: [(row: Int, tags: [String])] = library.compactMap {
-            guard let e = meta.entries[$0.path] else { return nil }
-            return (e.row, $0.tags)
+        // Score against the whole persisted corpus — every embedded image that has
+        // tags — regardless of what the host sent this call.
+        let refs: [(row: Int, tags: [String])] = meta.entries.values.compactMap {
+            $0.tags.isEmpty ? nil : ($0.row, $0.tags)
         }
 
         for file in req.files {
