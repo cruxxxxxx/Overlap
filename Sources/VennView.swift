@@ -26,7 +26,7 @@ struct VennView: View {
         GeometryReader { geo in
             let k = tags.count
             let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
-            let (centers, radii) = Self.layout(
+            let (centers, radii) = VennLayout.layout(
                 k: k, tags: tags, totals: totals, regions: regions,
                 canvas: geo.size, center: c)
 
@@ -82,19 +82,26 @@ struct VennView: View {
 
                 // count appears only for the region under the cursor
                 // (the full list lives in the chips row)
-                let poles = Self.regionPoles(k: k, centers: centers, radii: radii, regions: regions)
+                // Selected regions ALWAYS get a badge (a selected intersection
+                // often has no paintable geometric area — Euler impossibility —
+                // so the fill alone can't confirm it's on); hovered region also
+                // gets one. Pole if the area is exposed, else a fallback anchor
+                // from the in-circle centers so the marker still lands sensibly.
+                let poles = VennLayout.regionPoles(k: k, centers: centers, radii: radii, regions: regions)
                 ForEach(Array(regions.keys.sorted()), id: \.self) { mask in
-                    if let cnt = regions[mask], cnt > 0,
-                       let pole = poles[mask],
-                       mask == hoverMask {
-                        let on = selectedRegions.contains(mask)
+                    let on = selectedRegions.contains(mask)
+                    if let cnt = regions[mask], cnt > 0, mask == hoverMask || on {
+                        let anchor = poles[mask]?.point
+                            ?? VennLayout.fallbackAnchor(mask: mask, k: k, centers: centers)
                         Text("\(cnt)")
                             .font(.caption).bold().monospacedDigit()
                             .foregroundStyle(on ? Color.white : Color.primary)
                             .padding(.horizontal, 5).padding(.vertical, 1)
                             .background(on ? AnyShapeStyle(Color.accentColor.opacity(0.9))
                                           : AnyShapeStyle(.regularMaterial), in: Capsule())
-                            .position(pole.point)
+                            .overlay(Capsule().stroke(Color.accentColor,
+                                                      lineWidth: on && poles[mask] == nil ? 1.5 : 0))
+                            .position(anchor)
                             .allowsHitTesting(false)
                     }
                 }
@@ -114,7 +121,7 @@ struct VennView: View {
                         .underline(soloOn)
                         .shadow(color: colorScheme == .dark ? .black.opacity(0.6) : .white.opacity(0.6),
                                 radius: 2)
-                        .position(Self.labelAnchor(i: i, k: k, centers: centers, radii: radii))
+                        .position(VennLayout.labelAnchor(i: i, k: k, centers: centers, radii: radii))
                         .onTapGesture {
                             if solo > 0 { onToggleRegion(soloMask) }
                         }
@@ -216,218 +223,5 @@ struct VennView: View {
 
     private func circlePath(_ c: CGPoint, _ r: CGFloat) -> Path {
         Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
-    }
-
-    /// Data-driven Euler-ish layout. Every pair gets a target distance from
-    /// its REAL overlap — disjoint pairs spread apart, subsets nest, partial
-    /// overlaps sink together proportionally — then a deterministic spring
-    /// relaxation settles the circles and the result is fitted to the canvas.
-    /// Circles stay circles; the geometry just tells the truth about the data.
-    static func layout(k: Int, tags: [String], totals: [Int], regions: [Int: Int],
-                       canvas: CGSize, center c: CGPoint) -> ([CGPoint], [CGFloat]) {
-        let base = min(canvas.width, canvas.height) * 0.27
-        let maxTotal = CGFloat(max(1, totals.prefix(k).max() ?? 1))
-        var radii: [CGFloat] = (0..<k).map { i in
-            base * (0.5 + 0.5 * sqrt(CGFloat(totals[i]) / maxTotal))
-        }
-        guard k > 1 else { return ([c], radii) }
-
-        // pairwise shared counts + subset detection from the region data
-        var pair = [[Int]](repeating: [Int](repeating: 0, count: k), count: k)
-        var withTag = [Int](repeating: 0, count: k)
-        for (mask, cnt) in regions {
-            for i in 0..<k where mask & (1 << i) != 0 {
-                withTag[i] += cnt
-                for j in (i + 1)..<k where mask & (1 << j) != 0 {
-                    pair[i][j] += cnt; pair[j][i] += cnt
-                }
-            }
-        }
-        // isSubset[i][j]: every item with tag i also has tag j
-        var isSubset = [[Bool]](repeating: [Bool](repeating: false, count: k), count: k)
-        for i in 0..<k where withTag[i] > 0 {
-            for j in 0..<k where j != i {
-                isSubset[i][j] = pair[i][j] == withTag[i]
-            }
-        }
-        // a subset's circle must physically fit inside its container
-        for i in 0..<k {
-            for j in 0..<k where isSubset[i][j] {
-                radii[i] = min(radii[i], radii[j] - max(10, radii[j] * 0.2))
-            }
-        }
-        // Disjoint subsets sharing a container must fit side by side inside
-        // it: possible only when r_a + r_b ≤ R − gap. Scale them down until
-        // the geometry is feasible — then containment and separation can
-        // BOTH be satisfied instead of fighting.
-        for j in 0..<k {
-            let subs = (0..<k).filter { isSubset[$0][j] }
-            for a in subs {
-                for b in subs where b > a && pair[a][b] == 0 {
-                    let maxSum = radii[j] - 8
-                    let sum = radii[a] + radii[b]
-                    if sum > maxSum {
-                        let f = maxSum / sum
-                        radii[a] *= f
-                        radii[b] *= f
-                    }
-                }
-            }
-        }
-
-        func targetDistance(_ i: Int, _ j: Int) -> CGFloat {
-            let shared = pair[i][j]
-            let ri = radii[i], rj = radii[j]
-            if shared == 0 { return ri + rj + base * 0.9 }           // disjoint: real air
-            if shared == withTag[i] || shared == withTag[j] {        // subset: nest
-                return abs(ri - rj) * 0.5
-            }
-            let f = CGFloat(shared) / CGFloat(max(1, min(withTag[i], withTag[j])))
-            // weak overlaps stay shallow — only meaningful shares sink deep
-            let dMax = ri + rj + base * 0.15
-            let dMin = abs(ri - rj) + 10
-            return dMax - pow(f, 0.4) * (dMax - dMin)
-        }
-
-        // deterministic ring start, then spring relaxation toward targets
-        var pos: [CGPoint] = (0..<k).map { i in
-            let a = Double(i) / Double(k) * 2 * .pi - .pi / 2
-            return CGPoint(x: c.x + CGFloat(cos(a)) * base * 0.6,
-                           y: c.y + CGFloat(sin(a)) * base * 0.6)
-        }
-        var step: CGFloat = 0.25
-        for _ in 0..<220 {
-            for i in 0..<k {
-                for j in (i + 1)..<k {
-                    let dx = pos[j].x - pos[i].x, dy = pos[j].y - pos[i].y
-                    var d = sqrt(dx * dx + dy * dy)
-                    if d < 0.01 { d = 0.01 }
-                    let err = (d - targetDistance(i, j)) * step / 2
-                    let ux = dx / d, uy = dy / d
-                    pos[i].x += ux * err; pos[i].y += uy * err
-                    pos[j].x -= ux * err; pos[j].y -= uy * err
-                }
-            }
-            step *= 0.985
-        }
-
-        // Hard-constraint pass: springs compromise, geometry may not.
-        // Subsets get clamped fully INSIDE their containers (circle-packed),
-        // and disjoint pairs may not visually overlap.
-        for _ in 0..<80 {
-            for i in 0..<k {
-                for j in 0..<k where isSubset[i][j] {
-                    let dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y
-                    var d = sqrt(dx * dx + dy * dy)
-                    if d < 0.01 { d = 0.01 }
-                    let maxD = radii[j] - radii[i] - 5
-                    if d > maxD {
-                        // pull the subset back inside; the container stays put
-                        let pull = d - maxD
-                        pos[i].x -= dx / d * pull
-                        pos[i].y -= dy / d * pull
-                    }
-                }
-            }
-            for i in 0..<k {
-                for j in (i + 1)..<k where pair[i][j] == 0 {
-                    let dx = pos[j].x - pos[i].x, dy = pos[j].y - pos[i].y
-                    var d = sqrt(dx * dx + dy * dy)
-                    if d < 0.01 { d = 0.01 }
-                    let minD = radii[i] + radii[j] + 4
-                    if d < minD {
-                        let push = (minD - d) / 2
-                        pos[i].x -= dx / d * push; pos[i].y -= dy / d * push
-                        pos[j].x += dx / d * push; pos[j].y += dy / d * push
-                    }
-                }
-            }
-        }
-        // Containment gets the FINAL word — the disjoint push above may have
-        // nudged a subset back over its container's rim on the last round.
-        for _ in 0..<30 {
-            for i in 0..<k {
-                for j in 0..<k where isSubset[i][j] {
-                    let dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y
-                    var d = sqrt(dx * dx + dy * dy)
-                    if d < 0.01 { d = 0.01 }
-                    let maxD = radii[j] - radii[i] - 5
-                    if d > maxD {
-                        let pull = d - maxD
-                        pos[i].x -= dx / d * pull
-                        pos[i].y -= dy / d * pull
-                    }
-                }
-            }
-        }
-
-        // fit the settled layout into the canvas (scale positions AND radii)
-        var minX = CGFloat.greatestFiniteMagnitude, maxX = -CGFloat.greatestFiniteMagnitude
-        var minY = CGFloat.greatestFiniteMagnitude, maxY = -CGFloat.greatestFiniteMagnitude
-        for i in 0..<k {
-            minX = min(minX, pos[i].x - radii[i]); maxX = max(maxX, pos[i].x + radii[i])
-            minY = min(minY, pos[i].y - radii[i]); maxY = max(maxY, pos[i].y + radii[i])
-        }
-        let pad: CGFloat = 26   // room for outside labels
-        let scale = min(2.4, min((canvas.width - pad * 2) / max(maxX - minX, 1),
-                                 (canvas.height - pad * 2) / max(maxY - minY, 1)))
-        let mid = CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)
-        let centers = pos.map { p in
-            CGPoint(x: c.x + (p.x - mid.x) * scale, y: c.y + (p.y - mid.y) * scale)
-        }
-        radii = radii.map { $0 * scale }
-        return (centers, radii)
-    }
-
-    /// For every non-empty region, the deepest interior point ("pole") — the
-    /// spot farthest from all boundaries while inside every in-circle and
-    /// outside every out-circle. Found by grid sampling; exact enough for
-    /// labels and cheap (a few thousand distance checks).
-    static func regionPoles(k: Int, centers: [CGPoint], radii: [CGFloat],
-                            regions: [Int: Int]) -> [Int: (point: CGPoint, depth: CGFloat)] {
-        var out: [Int: (point: CGPoint, depth: CGFloat)] = [:]
-        for (mask, cnt) in regions where cnt > 0 {
-            let inBits = (0..<k).filter { mask & (1 << $0) != 0 }
-            let outBits = (0..<k).filter { mask & (1 << $0) == 0 }
-            guard let smallest = inBits.min(by: { radii[$0] < radii[$1] }) else { continue }
-
-            // the region must live inside its smallest in-circle — sample there
-            let cs = centers[smallest], rs = radii[smallest]
-            var best: (point: CGPoint, depth: CGFloat)?
-            let steps = 17
-            for gy in 0..<steps {
-                for gx in 0..<steps {
-                    let p = CGPoint(
-                        x: cs.x - rs + rs * 2 * CGFloat(gx) / CGFloat(steps - 1),
-                        y: cs.y - rs + rs * 2 * CGFloat(gy) / CGFloat(steps - 1))
-                    // depth = distance to the nearest constraint boundary
-                    var depth = CGFloat.greatestFiniteMagnitude
-                    for i in inBits {
-                        depth = min(depth, radii[i] - hypot(p.x - centers[i].x, p.y - centers[i].y))
-                    }
-                    for j in outBits {
-                        depth = min(depth, hypot(p.x - centers[j].x, p.y - centers[j].y) - radii[j])
-                    }
-                    if depth > (best?.depth ?? 0) { best = (p, depth) }
-                }
-            }
-            if let best, best.depth > 0 { out[mask] = best }
-        }
-        return out
-    }
-
-    /// A set's label sits inside its own circle, pushed away from the crowd
-    /// of neighboring circles so it clearly belongs to its ring.
-    static func labelAnchor(i: Int, k: Int, centers: [CGPoint], radii: [CGFloat]) -> CGPoint {
-        let ci = centers[i]
-        guard k > 1 else { return CGPoint(x: ci.x, y: ci.y - radii[i] * 0.55) }
-        var ax: CGFloat = 0, ay: CGFloat = 0
-        for j in 0..<k where j != i { ax += centers[j].x; ay += centers[j].y }
-        ax /= CGFloat(k - 1); ay /= CGFloat(k - 1)
-        var dx = ci.x - ax, dy = ci.y - ay
-        let len = sqrt(dx * dx + dy * dy)
-        if len < 1 { dx = 0; dy = -1 } else { dx /= len; dy /= len }
-        // just inside the rim, on the side facing away from the neighbors
-        return CGPoint(x: ci.x + dx * radii[i] * 0.72, y: ci.y + dy * radii[i] * 0.72)
     }
 }
