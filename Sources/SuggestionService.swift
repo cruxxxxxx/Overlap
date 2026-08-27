@@ -12,8 +12,12 @@ enum SuggestionEngine {
     /// Discover applicable plugins, run them concurrently, merge the results.
     /// Runs off-main (call from a detached task).
     nonisolated static func run(files: [RequestFile], library: [LibraryItem],
-                                knownTags: [String], kinds: Set<FileKind>) async -> [TagSuggestion] {
-        let plugins = PluginRegistry.discover().filter { p in kinds.contains(where: p.handles) }
+                                knownTags: [String], kinds: Set<FileKind>,
+                                disabledIDs: Set<String> = [],
+                                onProgress: (@Sendable (String) -> Void)? = nil) async -> [TagSuggestion] {
+        let plugins = PluginRegistry.discover().filter { p in
+            !disabledIDs.contains(p.id) && kinds.contains(where: p.handles)
+        }
         guard !plugins.isEmpty else { return [] }
         let raws = await withTaskGroup(of: [RawSuggestion].self) { group -> [RawSuggestion] in
             for plugin in plugins {
@@ -22,7 +26,7 @@ enum SuggestionEngine {
                         files: files,
                         knownTags: plugin.manifest.wantsKnownTags ? knownTags : nil,
                         library: plugin.manifest.wantsLibrary ? library : nil)
-                    return invoke(plugin, request: req)
+                    return invoke(plugin, request: req, onProgress: onProgress)
                 }
             }
             var acc: [RawSuggestion] = []
@@ -37,7 +41,8 @@ enum SuggestionEngine {
     /// Run one plugin to completion (or timeout) and return its clamped, path-
     /// validated suggestions. Returns `[]` on any failure.
     nonisolated private static func invoke(_ plugin: DiscoveredPlugin,
-                                           request: SuggestRequest) -> [RawSuggestion] {
+                                           request: SuggestRequest,
+                                           onProgress: (@Sendable (String) -> Void)? = nil) -> [RawSuggestion] {
         guard let payload = try? PluginCoder.encoder.encode(request) else { return [] }
 
         let proc = Process()
@@ -48,7 +53,30 @@ enum SuggestionEngine {
         proc.standardOutput = stdout
         proc.standardError = stderr
 
+        // Stream stderr as progress: a plugin may emit human-readable status lines
+        // (e.g. "Building suggestion index… 300/4000") while it works; the last
+        // line is surfaced in the UI. Draining also prevents a chatty plugin from
+        // blocking on a full stderr pipe.
+        let errReader = stderr.fileHandleForReading
+        if let onProgress {
+            var buf = Data()
+            errReader.readabilityHandler = { h in
+                let chunk = h.availableData
+                guard !chunk.isEmpty else { return }
+                buf.append(chunk)
+                while let nl = buf.firstIndex(of: 0x0A) {
+                    let lineData = buf.subdata(in: buf.startIndex..<nl)
+                    buf.removeSubrange(buf.startIndex...nl)
+                    if let line = String(data: lineData, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespaces), !line.isEmpty {
+                        onProgress(line)
+                    }
+                }
+            }
+        }
+
         do { try proc.run() } catch {
+            errReader.readabilityHandler = nil
             NSLog("[plugins] \(plugin.id): failed to launch — \(error.localizedDescription)")
             return []
         }
@@ -71,10 +99,12 @@ enum SuggestionEngine {
             proc.terminate()                            // SIGTERM
             usleep(50_000)
             if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+            errReader.readabilityHandler = nil
             NSLog("[plugins] \(plugin.id): timed out after \(plugin.manifest.timeoutMs)ms — killed")
             return []
         }
         proc.waitUntilExit()
+        errReader.readabilityHandler = nil
         guard proc.terminationStatus == 0 else {
             NSLog("[plugins] \(plugin.id): exited \(proc.terminationStatus)")
             return []
@@ -88,7 +118,7 @@ enum SuggestionEngine {
             .filter { valid.contains($0.path) && !$0.tag.isEmpty }
             .map { RawSuggestion(path: $0.path, tag: $0.tag,
                                  confidence: min(max($0.confidence, 0), 1),
-                                 source: plugin.manifest.name) }
+                                 source: plugin.manifest.name, group: $0.group) }
     }
 
     // MARK: - Merge / rank
@@ -103,10 +133,12 @@ enum SuggestionEngine {
                     tag: r.tag,
                     confidence: max(e.confidence, r.confidence),
                     source: e.confidence >= r.confidence ? e.source : (r.source ?? e.source),
-                    paths: e.paths.union([r.path]))
+                    paths: e.paths.union([r.path]),
+                    isGroup: e.isGroup || (r.group ?? false))
             } else {
                 byTag[r.tag] = TagSuggestion(tag: r.tag, confidence: r.confidence,
-                                             source: r.source ?? "plugin", paths: [r.path])
+                                             source: r.source ?? "plugin", paths: [r.path],
+                                             isGroup: r.group ?? false)
             }
         }
         return byTag.values.sorted {

@@ -50,6 +50,7 @@ struct RawSuggestion: Codable {
     let tag: String
     let confidence: Double            // 0…1, clamped host-side
     let source: String?               // optional; host overrides with the plugin name
+    var group: Bool? = nil            // true: a cluster handle to name, not a tag to apply
 }
 
 // MARK: - Merged result the UI consumes
@@ -59,6 +60,8 @@ struct TagSuggestion: Identifiable, Hashable {
     let confidence: Double
     let source: String                // plugin display name
     let paths: Set<String>            // which selected files it applies to
+    var isGroup: Bool = false         // true: a cluster handle — select its members and
+                                      // name them, rather than applying `tag` literally
     var id: String { tag }
 }
 

@@ -7,6 +7,6 @@
   "handles": ["image"],
   "batch": true,
   "wantsKnownTags": false,
-  "wantsLibrary": false,
-  "timeoutMs": 30000
+  "wantsLibrary": true,
+  "timeoutMs": 60000
 }
