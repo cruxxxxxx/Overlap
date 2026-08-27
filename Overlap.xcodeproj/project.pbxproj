@@ -19,22 +19,28 @@
 		439F4D9D19376597EA4CD7B7 /* demo-flower.png in Resources */ = {isa = PBXBuildFile; fileRef = F3ADE828C6C52EBADC2E1567 /* demo-flower.png */; };
 		44AF7A81E7208F108B82F633 /* QueryBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89A47F300D6D684652E8A861 /* QueryBar.swift */; };
 		516197EC1F6C0FE2A8206282 /* TVExceptionCatcher.m in Sources */ = {isa = PBXBuildFile; fileRef = FD655206D88A960895B7C619 /* TVExceptionCatcher.m */; };
+		58A3B89E74499A8ECF53CDD9 /* PluginRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80CDDCF7E04C0B8957EB8CEF /* PluginRegistry.swift */; };
+		6E6BB776F6E4545A34721393 /* SlideshowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F5C317D1A72C760600DA42D /* SlideshowView.swift */; };
 		7089DE528251BC9746C53754 /* TagStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FCB2B4B7D0A2C2059AEBE03 /* TagStore.swift */; };
 		7121CEC02561332893D30898 /* PrivacyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 385582827B8FB3942C356EE5 /* PrivacyView.swift */; };
 		7BA82D0875309D6CA0F6B7D3 /* CirclePack.swift in Sources */ = {isa = PBXBuildFile; fileRef = B22DED0C110EF7F8CF7C2E6B /* CirclePack.swift */; };
 		848A3FC7734D585EE61402B9 /* StatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 515E9CBCE47D2CF35FB855CF /* StatsView.swift */; };
 		8B82564CF4AFF9C55889377C /* demo-night.png in Resources */ = {isa = PBXBuildFile; fileRef = 6C46672A0282E0825ED33DD2 /* demo-night.png */; };
 		9E65DBDF5162B933EA60FE14 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5B282B55068C433819CF615 /* SidebarView.swift */; };
+		A4AF5249C04EA23A4717C458 /* FilePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 657AC1CAC1FDEA2389E585EA /* FilePreview.swift */; };
 		B05CA40DE972117A9C3B8AFF /* VennView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A429FB3EBD72A5FAAD05BDEE /* VennView.swift */; };
 		BDE3F59FB6027928A3F71359 /* demo-sunset.png in Resources */ = {isa = PBXBuildFile; fileRef = EFFCE0B5AEE5E01981CB7F12 /* demo-sunset.png */; };
+		C07952477346E2443791F571 /* SuggestionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A93D6386F7A5E3316F03223B /* SuggestionService.swift */; };
 		C14AFAA093CF29C2E64BFBC7 /* TutorialOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 245887A7AE045720FF2AD057 /* TutorialOverlay.swift */; };
 		C2AB16B6958CA1E93792DE6F /* ThumbnailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59C4E3A3894AA2C2D2826E63 /* ThumbnailCache.swift */; };
 		D566F2F4C8BEE89BC0B31A9A /* TagIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56EE77C009857BE25A9C6DFE /* TagIO.swift */; };
+		E272D1BE93E411DB59DDFA5D /* PluginContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE2749A6FEAF7C13BF5F4E41 /* PluginContract.swift */; };
 		E79E337DC39FF228D4472737 /* ExploreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19747B4E7F1808FFF2AE64A5 /* ExploreView.swift */; };
 		F3FB9CE9932A36775699D98E /* Tutorial.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0267C898CAAC4FDC62EDCA5E /* Tutorial.swift */; };
 		F6239EA6B9C2F111EFB98C18 /* demo-ocean.png in Resources */ = {isa = PBXBuildFile; fileRef = 6CA8F00A68A5A59D937E5505 /* demo-ocean.png */; };
 		F7081E5BBEE896BF43DDE3B9 /* demo-desert.png in Resources */ = {isa = PBXBuildFile; fileRef = EFFE39D29F1F0A35EC68964D /* demo-desert.png */; };
 		F7B8B6A3956B1BFE0EBFAD68 /* demo-city.png in Resources */ = {isa = PBXBuildFile; fileRef = 362F9A1380B4B7A8ABB4F812 /* demo-city.png */; };
+		FB57CEB2EFC336378942AD9F /* VennLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = F86689191C11367AB56AD0B9 /* VennLayout.swift */; };
 		FC2B18FBA3BB72EDBBCD3EE8 /* TagMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE720A61E4769A5E60B62A72 /* TagMapView.swift */; };
 		FD359299D24B14D31A0CD3B5 /* demo-snow.png in Resources */ = {isa = PBXBuildFile; fileRef = E88DA9126F1763CBD9DCF338 /* demo-snow.png */; };
 /* End PBXBuildFile section */
@@ -48,17 +54,21 @@
 		362F9A1380B4B7A8ABB4F812 /* demo-city.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "demo-city.png"; sourceTree = "<group>"; };
 		385582827B8FB3942C356EE5 /* PrivacyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyView.swift; sourceTree = "<group>"; };
 		3E120A68CA2D3EED3B3072D2 /* Overlap-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Overlap-Bridging-Header.h"; sourceTree = "<group>"; };
+		3F5C317D1A72C760600DA42D /* SlideshowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideshowView.swift; sourceTree = "<group>"; };
 		515E9CBCE47D2CF35FB855CF /* StatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsView.swift; sourceTree = "<group>"; };
 		56EE77C009857BE25A9C6DFE /* TagIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagIO.swift; sourceTree = "<group>"; };
 		59C4E3A3894AA2C2D2826E63 /* ThumbnailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailCache.swift; sourceTree = "<group>"; };
+		657AC1CAC1FDEA2389E585EA /* FilePreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePreview.swift; sourceTree = "<group>"; };
 		6C46672A0282E0825ED33DD2 /* demo-night.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "demo-night.png"; sourceTree = "<group>"; };
 		6CA8F00A68A5A59D937E5505 /* demo-ocean.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "demo-ocean.png"; sourceTree = "<group>"; };
 		7FCB2B4B7D0A2C2059AEBE03 /* TagStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagStore.swift; sourceTree = "<group>"; };
+		80CDDCF7E04C0B8957EB8CEF /* PluginRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginRegistry.swift; sourceTree = "<group>"; };
 		89A47F300D6D684652E8A861 /* QueryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryBar.swift; sourceTree = "<group>"; };
 		956C68E832660A3C577EDC5B /* ThumbnailCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailCell.swift; sourceTree = "<group>"; };
 		9C8E8108F1CA14CBFA3F0830 /* ResultsGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResultsGridView.swift; sourceTree = "<group>"; };
 		9DC1354E4EC383D845FE2D7A /* PreviewPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewPane.swift; sourceTree = "<group>"; };
 		A429FB3EBD72A5FAAD05BDEE /* VennView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VennView.swift; sourceTree = "<group>"; };
+		A93D6386F7A5E3316F03223B /* SuggestionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SuggestionService.swift; sourceTree = "<group>"; };
 		B22DED0C110EF7F8CF7C2E6B /* CirclePack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CirclePack.swift; sourceTree = "<group>"; };
 		B5B282B55068C433819CF615 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		CDFD72BDB677E4DD2A8438F1 /* QuickLookController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookController.swift; sourceTree = "<group>"; };
@@ -68,10 +78,12 @@
 		E5E2D644A019FBE86AB4F2C6 /* OverlapApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlapApp.swift; sourceTree = "<group>"; };
 		E74FA855F8AE9485FD406E40 /* TutorialHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TutorialHost.swift; sourceTree = "<group>"; };
 		E88DA9126F1763CBD9DCF338 /* demo-snow.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "demo-snow.png"; sourceTree = "<group>"; };
+		EE2749A6FEAF7C13BF5F4E41 /* PluginContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginContract.swift; sourceTree = "<group>"; };
 		EFFCE0B5AEE5E01981CB7F12 /* demo-sunset.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "demo-sunset.png"; sourceTree = "<group>"; };
 		EFFE39D29F1F0A35EC68964D /* demo-desert.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "demo-desert.png"; sourceTree = "<group>"; };
 		F39B00A4C824AF012E7537BD /* demo-forest.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "demo-forest.png"; sourceTree = "<group>"; };
 		F3ADE828C6C52EBADC2E1567 /* demo-flower.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "demo-flower.png"; sourceTree = "<group>"; };
+		F86689191C11367AB56AD0B9 /* VennLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VennLayout.swift; sourceTree = "<group>"; };
 		FD655206D88A960895B7C619 /* TVExceptionCatcher.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = TVExceptionCatcher.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -113,16 +125,21 @@
 			children = (
 				B22DED0C110EF7F8CF7C2E6B /* CirclePack.swift */,
 				19747B4E7F1808FFF2AE64A5 /* ExploreView.swift */,
+				657AC1CAC1FDEA2389E585EA /* FilePreview.swift */,
 				2B9C15B9609A8CAED2BBD620 /* Models.swift */,
 				3E120A68CA2D3EED3B3072D2 /* Overlap-Bridging-Header.h */,
 				E5E2D644A019FBE86AB4F2C6 /* OverlapApp.swift */,
+				EE2749A6FEAF7C13BF5F4E41 /* PluginContract.swift */,
+				80CDDCF7E04C0B8957EB8CEF /* PluginRegistry.swift */,
 				9DC1354E4EC383D845FE2D7A /* PreviewPane.swift */,
 				385582827B8FB3942C356EE5 /* PrivacyView.swift */,
 				89A47F300D6D684652E8A861 /* QueryBar.swift */,
 				CDFD72BDB677E4DD2A8438F1 /* QuickLookController.swift */,
 				9C8E8108F1CA14CBFA3F0830 /* ResultsGridView.swift */,
 				B5B282B55068C433819CF615 /* SidebarView.swift */,
+				3F5C317D1A72C760600DA42D /* SlideshowView.swift */,
 				515E9CBCE47D2CF35FB855CF /* StatsView.swift */,
+				A93D6386F7A5E3316F03223B /* SuggestionService.swift */,
 				56EE77C009857BE25A9C6DFE /* TagIO.swift */,
 				CE720A61E4769A5E60B62A72 /* TagMapView.swift */,
 				7FCB2B4B7D0A2C2059AEBE03 /* TagStore.swift */,
@@ -133,6 +150,7 @@
 				245887A7AE045720FF2AD057 /* TutorialOverlay.swift */,
 				DC9A63DFD67472CDE62C5C3C /* TVExceptionCatcher.h */,
 				FD655206D88A960895B7C619 /* TVExceptionCatcher.m */,
+				F86689191C11367AB56AD0B9 /* VennLayout.swift */,
 				A429FB3EBD72A5FAAD05BDEE /* VennView.swift */,
 			);
 			path = Sources;
@@ -227,15 +245,20 @@
 			files = (
 				7BA82D0875309D6CA0F6B7D3 /* CirclePack.swift in Sources */,
 				E79E337DC39FF228D4472737 /* ExploreView.swift in Sources */,
+				A4AF5249C04EA23A4717C458 /* FilePreview.swift in Sources */,
 				08CD41961A3E1632DB0D4256 /* Models.swift in Sources */,
 				41569B206A51BC0ABE25BE60 /* OverlapApp.swift in Sources */,
+				E272D1BE93E411DB59DDFA5D /* PluginContract.swift in Sources */,
+				58A3B89E74499A8ECF53CDD9 /* PluginRegistry.swift in Sources */,
 				07D0BDA5185A7D9769FF4E81 /* PreviewPane.swift in Sources */,
 				7121CEC02561332893D30898 /* PrivacyView.swift in Sources */,
 				44AF7A81E7208F108B82F633 /* QueryBar.swift in Sources */,
 				09926E3E73856F45B88ADD2A /* QuickLookController.swift in Sources */,
 				4160A953929876308C393B85 /* ResultsGridView.swift in Sources */,
 				9E65DBDF5162B933EA60FE14 /* SidebarView.swift in Sources */,
+				6E6BB776F6E4545A34721393 /* SlideshowView.swift in Sources */,
 				848A3FC7734D585EE61402B9 /* StatsView.swift in Sources */,
+				C07952477346E2443791F571 /* SuggestionService.swift in Sources */,
 				516197EC1F6C0FE2A8206282 /* TVExceptionCatcher.m in Sources */,
 				D566F2F4C8BEE89BC0B31A9A /* TagIO.swift in Sources */,
 				FC2B18FBA3BB72EDBBCD3EE8 /* TagMapView.swift in Sources */,
@@ -245,6 +268,7 @@
 				F3FB9CE9932A36775699D98E /* Tutorial.swift in Sources */,
 				09A8521EA9BC3B7980F57DE9 /* TutorialHost.swift in Sources */,
 				C14AFAA093CF29C2E64BFBC7 /* TutorialOverlay.swift in Sources */,
+				FB57CEB2EFC336378942AD9F /* VennLayout.swift in Sources */,
 				B05CA40DE972117A9C3B8AFF /* VennView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

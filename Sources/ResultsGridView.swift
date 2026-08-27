@@ -10,6 +10,7 @@ struct ResultsGridView: View {
     @State private var pendingURLs: [URL] = []
     @State private var keyMonitor: Any?
     @State private var tagInput = ""
+    @State private var didSuggest = false
     @FocusState private var tagFieldFocused: Bool
 
     private var columns: [GridItem] {
@@ -63,6 +64,10 @@ struct ResultsGridView: View {
 
     private var quickTagBar: some View {
         VStack(spacing: 0) {
+            if didSuggest {
+                Divider()
+                suggestedRow
+            }
             if tagFieldFocused && (!suggestions.isEmpty || canCreate) {
                 Divider()
                 VStack(alignment: .leading, spacing: 0) {
@@ -91,16 +96,63 @@ struct ResultsGridView: View {
                 if !store.selection.isEmpty {
                     Text("\(store.selection.count) selected")
                         .font(.caption).foregroundStyle(.secondary)
+                    Button { runSuggest() } label: {
+                        Image(systemName: "sparkles")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(store.suggesting)
+                    .help("Suggest tags for the selection")
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
         }
         .tutorialAnchor(.tagBar)
+        .onChange(of: store.selection) { _ in
+            didSuggest = false
+            store.clearSuggestions()
+        }
+    }
+
+    /// The plugin-suggested tag chips (shown after the user hits Suggest).
+    private var suggestedRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles").font(.caption2).foregroundStyle(.secondary)
+                Text("Suggested").font(.caption).foregroundStyle(.secondary)
+                if store.suggesting {
+                    ProgressView().controlSize(.small)
+                } else if store.suggestions.isEmpty {
+                    Text("none").font(.caption2).foregroundStyle(.tertiary)
+                }
+                ForEach(store.suggestions) { s in
+                    Button { applyTag(s.tag) } label: {
+                        HStack(spacing: 4) {
+                            Text(s.tag).font(.caption)
+                            Text("\(Int(s.confidence * 100))%")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                        .overlay(Capsule().stroke(Color.accentColor.opacity(0.4)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("\(s.source) · \(Int(s.confidence * 100))%")
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 5)
+        }
+    }
+
+    private func runSuggest() {
+        let items = store.results.filter { store.selection.contains($0.id) }
+        guard !items.isEmpty else { return }
+        didSuggest = true
+        store.suggestTags(for: items)
     }
 
     private var tagFieldPlaceholder: String {
         store.selection.isEmpty
-            ? "Select images, press T to tag"
+            ? "Select files, press T to tag"
             : "Add tag to \(store.selection.count) selected — ⏎ applies, Esc closes"
     }
 
@@ -258,6 +310,7 @@ struct ResultsGridView: View {
                             ThumbnailCell(item: item, size: thumbSize,
                                           selected: store.selection.contains(item.id))
                                 .id(item.id)
+                                .onTapGesture(count: 2) { handleOpen(item) }
                                 .onTapGesture { handleClick(item) }
                                 .onDrag { NSItemProvider(object: item.url as NSURL) }
                                 .contextMenu { contextMenu(for: item) }
@@ -287,8 +340,14 @@ struct ResultsGridView: View {
     private var queueBar: some View {
         HStack(spacing: 12) {
             Image(systemName: "tray.and.arrow.down")
-            Text("Queue").font(.headline)
+            if store.queueDrill.isEmpty {
+                Text("Queue").font(.headline)
+            } else {
+                queueBreadcrumb
+            }
             Text("\(store.results.count) untagged").foregroundStyle(.secondary)
+            TypeFilterMenu(queue: true)
+            TypeFilterChips()
             Spacer()
             SortMenu()
             Slider(value: $thumbSize, in: 90...280).frame(width: 120)
@@ -301,13 +360,30 @@ struct ResultsGridView: View {
         .padding(8)
     }
 
+    /// Home + drilled folder names; click any crumb to pop back to it.
+    private var queueBreadcrumb: some View {
+        HStack(spacing: 4) {
+            Button { store.popQueueDrill(to: 0) } label: {
+                Image(systemName: "house.fill")
+            }
+            .buttonStyle(.plain).help("Back to watched folders")
+            ForEach(Array(store.queueDrill.enumerated()), id: \.offset) { i, url in
+                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                Button(url.lastPathComponent) { store.popQueueDrill(to: i + 1) }
+                    .buttonStyle(.plain)
+                    .fontWeight(i == store.queueDrill.count - 1 ? .semibold : .regular)
+            }
+        }
+        .font(.headline)
+    }
+
     private var emptyState: some View {
         VStack(spacing: 8) {
             if store.mode == .queue {
                 Image(systemName: "tray").font(.system(size: 40)).foregroundStyle(.tertiary)
                 Text("Queue empty")
                     .foregroundStyle(.secondary)
-                Text("Add a watched folder, or all found images are already tagged")
+                Text("Add a watched folder, or all found files are already tagged")
                     .font(.caption).foregroundStyle(.tertiary)
             } else {
                 Image(systemName: "tag").font(.system(size: 40)).foregroundStyle(.tertiary)
@@ -342,6 +418,15 @@ struct ResultsGridView: View {
         } else {
             store.selection = [item.id]
             store.selectionAnchor = item.id
+        }
+    }
+
+    /// Double-click: in the queue, step into a folder; otherwise Quick Look.
+    private func handleOpen(_ item: FileItem) {
+        if store.mode == .queue && item.kind == .folder {
+            store.enterQueueFolder(item.url)
+        } else {
+            QuickLookOpener.open(targetURLs(for: item))
         }
     }
 
@@ -391,7 +476,9 @@ struct ResultsGridView: View {
             NSPasteboard.general.setString(paths, forType: .string)
         }
         Button("Export…") { exportURLs(targetURLs(for: item)) }
-        Button("Fix Extension") { store.fixExtension(targetURLs(for: item)) }
+        if item.kind == .image {
+            Button("Fix Extension") { store.fixExtension(targetURLs(for: item)) }
+        }
         Divider()
         Button("Move to Trash", role: .destructive) {
             store.trash(targetURLs(for: item))

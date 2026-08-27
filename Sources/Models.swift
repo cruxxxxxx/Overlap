@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Which left-column mode is active.
 enum LibraryMode { case tags, queue, explore }
@@ -9,16 +10,16 @@ enum LibraryMode { case tags, queue, explore }
 ///  - any:  item has at least one (OR)
 ///  - only: item's tags are exactly the sets, nothing else ("Exact",
 ///          meaningful only when the query has a single diagram)
-enum MatchMode { case all, any, only }
+enum MatchMode: String, Codable { case all, any, only }
 
 /// How a diagram joins the previous one (ignored on the first diagram).
 /// The query evaluates as sum-of-products: OR starts a new clause, AND binds
 /// diagrams within a clause — `D1 AND D2 OR D3` = (D1 ∧ D2) ∨ D3.
-enum GroupOp: String { case and = "AND", or = "OR" }
+enum GroupOp: String, Codable { case and = "AND", or = "OR" }
 
 /// One Venn diagram: an ordered list of sets and (optionally) painted regions.
 /// Painted regions override `mode`.
-struct VennGroup: Identifiable, Equatable {
+struct VennGroup: Identifiable, Equatable, Codable {
     let id: UUID
     var sets: [String]
     var regions: Set<Int>     // membership bitmasks over `sets`; empty = use mode
@@ -33,6 +34,16 @@ struct VennGroup: Identifiable, Equatable {
         self.mode = mode
         self.op = op
     }
+}
+
+/// A named snapshot of a full query — its diagrams (sets + painted regions +
+/// mode + join op) plus global excludes — so a Venn setup can be reused without
+/// rebuilding it. Type filters are session-only and intentionally not saved.
+struct SavedQuery: Identifiable, Codable {
+    var id: UUID = UUID()
+    var name: String
+    var groups: [VennGroup]
+    var excludes: [String]
 }
 
 /// A Venn set's effective role across a diagram's painted regions:
@@ -89,6 +100,56 @@ enum TriState: Int {
     }
 }
 
+/// Broad content category, derived from the file's UTType. Drives the type
+/// filter and the fallback thumbnail icon. Overlap is type-agnostic: it tags
+/// and queries any file, and this just groups them.
+enum FileKind: String, CaseIterable, Identifiable {
+    case image, video, audio, pdf, text, archive, folder, other
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .image: return "Images"
+        case .video: return "Videos"
+        case .audio: return "Audio"
+        case .pdf: return "PDFs"
+        case .text: return "Text"
+        case .archive: return "Archives"
+        case .folder: return "Folders"
+        case .other: return "Other"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .image: return "photo"
+        case .video: return "film"
+        case .audio: return "music.note"
+        case .pdf: return "doc.richtext"
+        case .text: return "doc.text"
+        case .archive: return "doc.zipper"
+        case .folder: return "folder"
+        case .other: return "doc"
+        }
+    }
+
+    /// Classify by UTType conformance, preferring a real content type and
+    /// falling back to the extension.
+    static func of(contentType: UTType?, ext: String) -> FileKind {
+        guard let ut = contentType ?? UTType(filenameExtension: ext.lowercased()) else {
+            return .other
+        }
+        if ut.conforms(to: .folder) { return .folder }
+        if ut.conforms(to: .image) { return .image }
+        if ut.conforms(to: .movie) || ut.conforms(to: .video) { return .video }
+        if ut.conforms(to: .audio) { return .audio }
+        if ut.conforms(to: .pdf) { return .pdf }
+        if ut.conforms(to: .archive) { return .archive }
+        if ut.conforms(to: .text) || ut.conforms(to: .sourceCode) { return .text }
+        return .other
+    }
+}
+
 /// A file shown in the results grid.
 struct FileItem: Identifiable, Hashable {
     let url: URL
@@ -97,31 +158,49 @@ struct FileItem: Identifiable, Hashable {
     let modDate: Date?
     let createdDate: Date?
     let size: Int64?
+    let kind: FileKind
 
     var id: String { url.path }
     var name: String { url.lastPathComponent }
     var ext: String { url.pathExtension.lowercased() }
 
     init(url: URL, tags: [String],
-         modDate: Date? = nil, createdDate: Date? = nil, size: Int64? = nil) {
+         modDate: Date? = nil, createdDate: Date? = nil, size: Int64? = nil,
+         contentType: UTType? = nil) {
         self.url = url
         self.tags = tags
         self.tagSet = Set(tags)
         self.modDate = modDate
         self.createdDate = createdDate
         self.size = size
+        self.kind = FileKind.of(contentType: contentType, ext: url.pathExtension)
     }
 
-    /// Build from disk: tags + dates + size in one resource-values read.
+    /// Fast path for the on-disk cache: kind is already known, so skip the
+    /// UTType lookup (matters when rebuilding thousands of items on launch).
+    init(url: URL, tags: [String], modDate: Date?, createdDate: Date?,
+         size: Int64?, kind: FileKind) {
+        self.url = url
+        self.tags = tags
+        self.tagSet = Set(tags)
+        self.modDate = modDate
+        self.createdDate = createdDate
+        self.size = size
+        self.kind = kind
+    }
+
+    /// Build from disk: tags + dates + size + content type in one read.
     static func load(_ url: URL) -> FileItem {
         let vals = try? url.resourceValues(forKeys: [
-            .tagNamesKey, .contentModificationDateKey, .creationDateKey, .fileSizeKey])
+            .tagNamesKey, .contentModificationDateKey, .creationDateKey,
+            .fileSizeKey, .contentTypeKey])
         return FileItem(
             url: url,
             tags: vals?.tagNames ?? [],
             modDate: vals?.contentModificationDate,
             createdDate: vals?.creationDate,
-            size: vals?.fileSize.map(Int64.init))
+            size: vals?.fileSize.map(Int64.init),
+            contentType: vals?.contentType)
     }
 }
 

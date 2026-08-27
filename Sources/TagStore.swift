@@ -26,6 +26,7 @@ final class TagStore: ObservableObject {
     @Published var tagTree: [TagNode] = []
     @Published var tagCounts: [String: Int] = [:]
     @Published var isIndexing = false
+    @Published var isScanning = false   // queue scan running off-main
 
     // THE query — single source of truth for every query-building UI.
     // One or more Venn diagrams (groups) that AND together, plus global
@@ -34,8 +35,21 @@ final class TagStore: ObservableObject {
     @Published private(set) var groups: [VennGroup] = { [VennGroup()] }()
     @Published private(set) var activeGroupID = UUID()
     @Published private(set) var queryExcludes: Set<String> = []
+
+    /// Named, persisted query snapshots (diagrams + excludes).
+    @Published private(set) var savedQueries: [SavedQuery] = []
+    /// Type filter, orthogonal to the tag query. Empty = all pass. A result
+    /// must match the kind filter (if any) AND the extension filter (if any).
+    @Published var kindFilter: Set<FileKind> = []
+    @Published var extFilter: Set<String> = []
     /// User-created tags kept in the tree even when no file carries them yet.
     @Published var knownTags: Set<String> = []
+
+    /// Plugin-generated tag suggestions for the current selection (via the
+    /// out-of-process suggestion plugins). Populated on demand by `suggestTags`.
+    @Published private(set) var suggestions: [TagSuggestion] = []
+    @Published private(set) var suggesting = false
+    private var suggestToken = UUID()
     /// Custom order for top-level tags (names). Unlisted ones fall back to A→Z.
     @Published var tagOrder: [String] = []
 
@@ -76,7 +90,12 @@ final class TagStore: ObservableObject {
     @Published var mode: LibraryMode = .tags
     @Published var queueFolders: [URL] = []
     @Published var queueItems: [FileItem] = []
-    @Published var queueRecursive = false
+    /// Max subfolder levels the queue scan descends. 1 = immediate contents
+    /// only; Int.max = unlimited. Caps runaway recursion over huge trees.
+    @Published var queueDepth = 1
+    /// Finder-style drill path. Empty = the watched folders; otherwise the queue
+    /// shows the immediate contents of the last URL (so you can step deeper).
+    @Published var queueDrill: [URL] = []
 
     // Undo
     @Published private(set) var canUndo = false
@@ -91,22 +110,31 @@ final class TagStore: ObservableObject {
     private let catalogQuery = NSMetadataQuery()
     private var observers: [NSObjectProtocol] = []
     private let tagAttr = "kMDItemUserTags"
-    private let imageExts: Set<String> =
-        ["jpg", "jpeg", "png", "gif", "webp", "heic", "tif", "tiff", "bmp"]
     private let foldersDefaultsKey = "queueFolders"
-    private let recursiveDefaultsKey = "queueRecursive"
+    private let queueDepthKey = "queueDepth"
     private let hiddenTagsKey = "hiddenTags"
     private let tagDefaultsKey = "tagDefaults"
     private let passSaltKey = "hiddenPassSalt"
     private let passHashKey = "hiddenPassHash"
+    private let savedQueriesKey = "savedQueries"
 
     init(scope: URL) {
         self.scopeURL = scope
         activeGroupID = groups[0].id
+        loadSavedQueries()
         loadQueueFolders()
         applyQueryDefaults()   // seed the query from per-tag default stances
+        loadCache()            // instant tags from disk; Spotlight reconciles async
         wireQueries()
         start()
+
+        // Debug: auto-apply a saved query so the headless validator has data.
+        // The empty first refresh dumps nothing; the catalog-load refresh
+        // rewrites the dump with real region counts.
+        if let name = ProcessInfo.processInfo.environment["OVERLAP_VENN_QUERY"],
+           let q = savedQueries.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            applySavedQuery(q.id)
+        }
     }
 
     deinit {
@@ -136,36 +164,63 @@ final class TagStore: ObservableObject {
         scopeURL = url
         catalogQuery.stop()
         catalogQuery.searchScopes = [url]
+        allItems = []
+        loadCache()            // seed the new scope from its cache immediately
         start()
     }
 
     // MARK: - Catalog
 
     /// Spotlight can report the same file under either the `/Users/…` firmlink
-    /// or its `/System/Volumes/Data/Users/…` backing path. Resolve to one
-    /// canonical form so a file is never seen (or appended) twice.
-    private func canonicalURL(_ path: String) -> URL {
-        URL(fileURLWithPath: path).resolvingSymlinksInPath()
+    /// or its `/System/Volumes/Data/Users/…` backing path. Collapse to one form.
+    /// Pure string work — `resolvingSymlinksInPath()` hits the filesystem, and
+    /// doing that per item (thousands) on the main thread beachballs launch.
+    private static let dataFirmlink = "/System/Volumes/Data"
+    nonisolated private static func canon(_ path: String) -> URL {
+        if path.hasPrefix(dataFirmlink + "/") {
+            return URL(fileURLWithPath: String(path.dropFirst(dataFirmlink.count)))
+        }
+        return URL(fileURLWithPath: path)
     }
 
     private func rebuildCatalog() {
+        // Reading each NSMetadataItem attribute is a synchronous XPC call to the
+        // metadata daemon; doing thousands on the main thread beachballs launch.
+        // Snapshot the item refs on main (updates paused), extract off-main, then
+        // publish back. Updates stay disabled until we've republished.
         catalogQuery.disableUpdates()
-        var items: [FileItem] = []
-        for i in 0..<catalogQuery.resultCount {
-            guard let item = catalogQuery.result(at: i) as? NSMetadataItem,
-                  let path = item.value(forAttribute: NSMetadataItemPathKey) as? String,
-                  let tags = item.value(forAttribute: tagAttr) as? [String] else { continue }
-            let mod = item.value(forAttribute: "kMDItemContentModificationDate") as? Date
-            let created = item.value(forAttribute: "kMDItemContentCreationDate") as? Date
-            let size = (item.value(forAttribute: "kMDItemFSSize") as? NSNumber)?.int64Value
-            items.append(FileItem(url: canonicalURL(path), tags: tags,
-                                  modDate: mod, createdDate: created, size: size))
+        let tagAttr = self.tagAttr
+        let items = (0..<catalogQuery.resultCount).compactMap {
+            catalogQuery.result(at: $0) as? NSMetadataItem
         }
-        catalogQuery.enableUpdates()
-        allItems = Self.deduped(items)
-        recomputeCounts()   // rebuilds the visible pool + counts + tree
-        isIndexing = false
-        refreshVisible()
+        Task.detached(priority: .userInitiated) { [weak self] in
+            var built: [FileItem] = []
+            built.reserveCapacity(items.count)
+            for item in items {
+                guard let path = item.value(forAttribute: NSMetadataItemPathKey) as? String,
+                      let tags = item.value(forAttribute: tagAttr) as? [String] else { continue }
+                let mod = item.value(forAttribute: "kMDItemContentModificationDate") as? Date
+                let created = item.value(forAttribute: "kMDItemContentCreationDate") as? Date
+                let size = (item.value(forAttribute: "kMDItemFSSize") as? NSNumber)?.int64Value
+                // Content type distinguishes folders (empty ext → otherwise
+                // misclassified as .other) and gives an accurate kind cheaply.
+                let ctype = (item.value(forAttribute: "kMDItemContentType") as? String)
+                    .flatMap { UTType($0) }
+                built.append(FileItem(url: TagStore.canon(path), tags: tags,
+                                      modDate: mod, createdDate: created, size: size,
+                                      contentType: ctype))
+            }
+            let deduped = TagStore.deduped(built)
+            await MainActor.run {
+                guard let self else { return }
+                self.allItems = deduped
+                self.recomputeCounts()   // rebuilds the visible pool + counts + tree
+                self.isIndexing = false
+                self.refreshVisible()
+                self.catalogQuery.enableUpdates()
+                self.saveCache()
+            }
+        }
     }
 
     /// Incremental update: apply only the items Spotlight reports as
@@ -187,7 +242,7 @@ final class TagStore: ObservableObject {
             else { continue }
             // Read from disk, not Spotlight's (briefly stale) index — avoids the
             // count flickering up/down right after an edit.
-            let fi = FileItem.load(canonicalURL(path))
+            let fi = FileItem.load(Self.canon(path))
             if let idx = allItems.firstIndex(where: { $0.id == fi.id }) {
                 allItems[idx] = fi
             } else {
@@ -196,7 +251,7 @@ final class TagStore: ObservableObject {
         }
         for item in removed {
             if let path = item.value(forAttribute: NSMetadataItemPathKey) as? String {
-                let key = canonicalURL(path).path
+                let key = Self.canon(path).path
                 allItems.removeAll { $0.id == key }
             }
         }
@@ -207,6 +262,67 @@ final class TagStore: ObservableObject {
         }
         recomputeCounts()
         refreshVisible()
+        saveCache()
+    }
+
+    // MARK: - Catalog cache (instant launch)
+
+    /// Snapshot of the catalog persisted to disk so the tag tree appears
+    /// immediately on the next launch, before Spotlight finishes gathering.
+    private struct CatalogCache: Codable {
+        struct Item: Codable {
+            let path: String; let tags: [String]
+            let mod: Date?; let created: Date?; let size: Int64?; let kind: String
+        }
+        let items: [Item]
+    }
+
+    private func cacheURL(for scope: URL) -> URL? {
+        let fm = FileManager.default
+        guard let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        else { return nil }
+        let dir = base.appendingPathComponent("Overlap", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Stable per-scope filename (djb2 of the path — hashValue isn't stable).
+        var h: UInt64 = 5381
+        for b in scope.standardizedFileURL.path.utf8 { h = (h &* 33) &+ UInt64(b) }
+        return dir.appendingPathComponent("catalog-\(String(h, radix: 16)).json")
+    }
+
+    /// Seed `allItems` from the on-disk cache. Decoding + building thousands of
+    /// items happens off the main thread so the window paints immediately; the
+    /// tags then appear a frame later. Skipped if Spotlight already filled in.
+    private func loadCache() {
+        guard let url = cacheURL(for: scopeURL) else { return }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let data = try? Data(contentsOf: url),
+                  let cache = try? JSONDecoder().decode(CatalogCache.self, from: data) else { return }
+            let items = cache.items.map {
+                FileItem(url: URL(fileURLWithPath: $0.path), tags: $0.tags,
+                         modDate: $0.mod, createdDate: $0.created, size: $0.size,
+                         kind: FileKind(rawValue: $0.kind) ?? .other)
+            }
+            await MainActor.run {
+                guard let self, self.allItems.isEmpty else { return }
+                self.allItems = Self.deduped(items)
+                self.recomputeCounts()
+                self.refreshResults()
+            }
+        }
+    }
+
+    /// Write the current catalog to disk off the main thread.
+    private func saveCache() {
+        guard let url = cacheURL(for: scopeURL) else { return }
+        let snapshot = CatalogCache(items: allItems.map {
+            .init(path: $0.url.path, tags: $0.tags,
+                  mod: $0.modDate, created: $0.createdDate, size: $0.size, kind: $0.kind.rawValue)
+        })
+        Task.detached(priority: .utility) {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: url, options: .atomic)
+            }
+        }
     }
 
     private func applyCounts(_ counts: [String: Int]) {
@@ -235,7 +351,7 @@ final class TagStore: ObservableObject {
     /// Enforce one entry per path. Spotlight can occasionally surface the same
     /// path twice during a rescan, and stale entries can linger after files
     /// move; either would render a file twice in the grid.
-    private static func deduped(_ items: [FileItem]) -> [FileItem] {
+    nonisolated private static func deduped(_ items: [FileItem]) -> [FileItem] {
         var seen = Set<String>()
         var out: [FileItem] = []
         out.reserveCapacity(items.count)
@@ -422,6 +538,17 @@ final class TagStore: ObservableObject {
         refreshResults()
     }
 
+    /// Drop painted masks that no item actually carries. The include/exclude
+    /// bit-expansion generates the full powerset of variants; the empty ones
+    /// are result-neutral (they match nothing) but they clutter the diagram and
+    /// balloon saved queries — so prune them to keep `regions` == what's real.
+    private func pruneEmptyRegions(_ gi: Int) {
+        guard gi >= 0, gi < groups.count, !groups[gi].regions.isEmpty,
+              !visibleItems.isEmpty else { return }   // no data yet → don't wipe
+        let live = Set(vennData(groups[gi].sets).regions.keys)
+        groups[gi].regions.formIntersection(live)
+    }
+
     // MARK: Tag mutation (group-aware)
 
     /// Add a tag as a new circle on the ACTIVE diagram (no-op if it's already
@@ -433,6 +560,7 @@ final class TagStore: ObservableObject {
             if regionRole(tag) == .excluded, let i = groups[gi].sets.firstIndex(of: tag) {
                 let bit = 1 << i
                 groups[gi].regions = Set(groups[gi].regions.flatMap { [$0, $0 | bit] })
+                pruneEmptyRegions(gi)
             }
             refreshResults()
         } else {
@@ -449,6 +577,7 @@ final class TagStore: ObservableObject {
             let constrained = Set(groups[gi].regions.map { $0 & ~bit }).filter { $0 != 0 }
             if !constrained.isEmpty {
                 groups[gi].regions = constrained
+                pruneEmptyRegions(gi)
                 refreshResults()
                 return
             }
@@ -509,6 +638,49 @@ final class TagStore: ObservableObject {
                 break
             }
         }
+    }
+
+    // MARK: - Saved queries
+
+    private func loadSavedQueries() {
+        guard let data = UserDefaults.standard.data(forKey: savedQueriesKey),
+              let decoded = try? JSONDecoder().decode([SavedQuery].self, from: data) else { return }
+        savedQueries = decoded
+    }
+
+    private func persistSavedQueries() {
+        if let data = try? JSONEncoder().encode(savedQueries) {
+            UserDefaults.standard.set(data, forKey: savedQueriesKey)
+        }
+    }
+
+    /// Snapshot the current diagrams + excludes under `name`. Same name
+    /// overwrites, so re-saving updates in place.
+    func saveCurrentQuery(name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if let i = savedQueries.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            savedQueries[i].groups = groups
+            savedQueries[i].excludes = Array(queryExcludes)
+        } else {
+            savedQueries.append(SavedQuery(name: trimmed, groups: groups, excludes: Array(queryExcludes)))
+        }
+        persistSavedQueries()
+    }
+
+    /// Replace the live query with a saved one and refresh.
+    func applySavedQuery(_ id: UUID) {
+        guard let q = savedQueries.first(where: { $0.id == id }) else { return }
+        groups = q.groups.isEmpty ? [VennGroup()] : q.groups
+        activeGroupID = groups[0].id
+        queryExcludes = Set(q.excludes)
+        for gi in groups.indices { pruneEmptyRegions(gi) }
+        refreshResults()
+    }
+
+    func deleteSavedQuery(_ id: UUID) {
+        savedQueries.removeAll { $0.id == id }
+        persistSavedQueries()
     }
 
     // MARK: - Hidden tags & default stance (public)
@@ -660,10 +832,11 @@ final class TagStore: ObservableObject {
     /// clause passes and no exclude matches. Per diagram: painted regions
     /// gate the membership mask; otherwise the diagram's mode does.
     func refreshResults() {
-        if mode == .queue { results = sortItems(queueItems); return }
+        if mode == .queue { results = sortItems(filteredQueue()); return }
         let activeGroups = groups.filter { !$0.sets.isEmpty }
         let exc = activeExcludes
-        guard !activeGroups.isEmpty || !exc.isEmpty else { results = []; return }
+        let hasTypeFilter = !kindFilter.isEmpty || !extFilter.isEmpty
+        guard !activeGroups.isEmpty || !exc.isEmpty || hasTypeFilter else { results = []; return }
 
         // Split into OR-separated clauses of AND-joined diagrams.
         var clauses: [[VennGroup]] = []
@@ -690,9 +863,67 @@ final class TagStore: ObservableObject {
                 if !anyClause { return false }
             }
             for e in exc where hasTag(item, e) { return false }
+            if !kindFilter.isEmpty && !kindFilter.contains(item.kind) { return false }
+            if !extFilter.isEmpty && !extFilter.contains(item.ext) { return false }
             return true
         }
         results = sortItems(filtered)
+        writeVennDump()
+    }
+
+    /// Debug hook for the headless validator (scripts/validate-venn.swift):
+    /// when launched with OVERLAP_VENN_DUMP=1, snapshot every non-empty diagram
+    /// (tags/totals/regions/selection) to venn-dump.json on each refresh.
+    private func writeVennDump() {
+        guard ProcessInfo.processInfo.environment["OVERLAP_VENN_DUMP"] != nil else { return }
+        let diagrams: [VennDump.Diagram] = groups.filter { !$0.sets.isEmpty }.map { g in
+            let d = vennData(g.sets)
+            return VennDump.Diagram(
+                tags: g.sets, totals: d.totals,
+                regions: d.regions.map { VennDump.RegionCount(mask: $0.key, count: $0.value) },
+                selected: Array(g.regions))
+        }
+        guard !diagrams.isEmpty,
+              let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
+              let data = try? JSONEncoder().encode(VennDump(diagrams: diagrams)) else { return }
+        let dir = base.appendingPathComponent("Overlap", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? data.write(to: dir.appendingPathComponent("venn-dump.json"))
+    }
+
+    // MARK: - Type filter
+
+    func setKindFilter(_ kind: FileKind, _ on: Bool) {
+        if on { kindFilter.insert(kind) } else { kindFilter.remove(kind) }
+        refreshResults()
+    }
+
+    func setExtFilter(_ ext: String, _ on: Bool) {
+        if on { extFilter.insert(ext) } else { extFilter.remove(ext) }
+        refreshResults()
+    }
+
+    func clearTypeFilter() {
+        kindFilter = []; extFilter = []
+        refreshResults()
+    }
+
+    /// Counts per kind for the type-filter menu badges. `queue` counts the queue
+    /// intake; otherwise the visible catalog pool.
+    func kindCounts(queue: Bool = false) -> [FileKind: Int] {
+        var counts: [FileKind: Int] = [:]
+        for item in (queue ? queueItems : visibleItems) { counts[item.kind, default: 0] += 1 }
+        return counts
+    }
+
+    /// Counts per extension, most-common first.
+    func extCounts(queue: Bool = false) -> [(ext: String, count: Int)] {
+        var counts: [String: Int] = [:]
+        for item in (queue ? queueItems : visibleItems) where !item.ext.isEmpty {
+            counts[item.ext, default: 0] += 1
+        }
+        return counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .map { ($0.key, $0.value) }
     }
 
     private func refreshVisible() {
@@ -797,6 +1028,50 @@ final class TagStore: ObservableObject {
         push("Add “\(tag)”",
              undo: { [weak self] in self?.lowSetTag(tag, on: changed, add: false) },
              redo: { [weak self] in self?.lowSetTag(tag, on: changed, add: true) })
+    }
+
+    // MARK: - Tag suggestions (out-of-process plugins)
+
+    /// The tagged corpus handed to plugins that ask for it (`wantsLibrary`):
+    /// every visible file that already carries at least one tag. Respects the
+    /// hidden-tag pool, so locked hidden files never leak into a plugin.
+    var taggedLibrary: [FileItem] { visibleItems.filter { !$0.tags.isEmpty } }
+
+    func clearSuggestions() {
+        suggestToken = UUID()
+        suggestions = []
+        suggesting = false
+    }
+
+    /// Run the suggestion plugins on `items` and publish the merged results,
+    /// dropping tags already on the whole selection. A newer call supersedes an
+    /// in-flight one (token guard) so stale results can't land.
+    func suggestTags(for items: [FileItem]) {
+        guard !items.isEmpty else { clearSuggestions(); return }
+        let token = UUID()
+        suggestToken = token
+        suggestions = []
+        suggesting = true
+
+        let files = items.map { RequestFile(path: $0.url.path, kind: $0.kind.rawValue,
+                                            ext: $0.ext, tags: $0.tags, size: $0.size,
+                                            modDate: $0.modDate, createdDate: $0.createdDate) }
+        let library = taggedLibrary.map { LibraryItem(path: $0.url.path, kind: $0.kind.rawValue,
+                                                      tags: $0.tags, modDate: $0.modDate) }
+        let applied = items.reduce(into: Set<String>()) { $0.formUnion($1.tagSet) }
+        let known = Array(knownTags)
+        let kinds = Set(items.map(\.kind))
+
+        Task.detached(priority: .userInitiated) {
+            let merged = await SuggestionEngine.run(files: files, library: library,
+                                                    knownTags: known, kinds: kinds)
+            let filtered = merged.filter { !applied.contains($0.tag) }
+            await MainActor.run { [weak self] in
+                guard let self, self.suggestToken == token else { return }
+                self.suggestions = filtered
+                self.suggesting = false
+            }
+        }
     }
 
     func removeTag(_ tag: String, from urls: [URL]) {
@@ -1013,39 +1288,85 @@ final class TagStore: ObservableObject {
         if m == .queue { scanQueue() } else { refreshResults() }
     }
 
-    private func isImage(_ url: URL) -> Bool {
-        imageExts.contains(url.pathExtension.lowercased())
-    }
-
+    /// Everything visible enters the queue — files of any kind AND folders. The
+    /// Type filter (Images / PDFs / Folders / …) is the single control over what
+    /// the user sees; there's no separate intake gate. Hidden files and package
+    /// internals are already skipped by the enumerator options.
+    ///
+    /// Scanning walks every file+folder under the watched roots and reads each
+    /// one's tags (a stat + xattr) — with recursion over a big tree that's tens
+    /// of thousands of items, so it runs OFF the main thread and publishes back.
     func scanQueue() {
-        let fm = FileManager.default
-        var found: [FileItem] = []
-        for folder in queueFolders {
-            for url in imageURLs(in: folder, fm: fm) {
-                let fi = FileItem.load(url)
-                if fi.tags.isEmpty { found.append(fi) }
+        // Drilled into a folder → show just its immediate contents (depth 1) so
+        // stepping deeper is one click at a time; else the watched roots.
+        let folders = queueDrill.last.map { [$0] } ?? queueFolders
+        let depth = queueDrill.isEmpty ? queueDepth : 1
+        isScanning = true
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let fm = FileManager.default
+            var found: [FileItem] = []
+            for folder in folders {
+                for url in TagStore.intakeURLs(in: folder, fm: fm, maxDepth: depth) {
+                    let fi = FileItem.load(url)
+                    if fi.tags.isEmpty { found.append(fi) }
+                }
+            }
+            let result = found
+            await MainActor.run {
+                guard let self else { return }
+                self.queueItems = result
+                self.isScanning = false
+                if self.mode == .queue { self.selection = []; self.results = self.sortItems(self.filteredQueue()) }
             }
         }
-        queueItems = found
-        if mode == .queue { selection = []; results = sortItems(found) }
     }
 
-    private func imageURLs(in folder: URL, fm: FileManager) -> [URL] {
-        if queueRecursive {
-            var acc: [URL] = []
-            let en = fm.enumerator(at: folder, includingPropertiesForKeys: nil,
-                                   options: [.skipsHiddenFiles, .skipsPackageDescendants])
-            while let url = en?.nextObject() as? URL { if isImage(url) { acc.append(url) } }
-            return acc
+    /// Queue items narrowed by the active type filter (kind + extension).
+    private func filteredQueue() -> [FileItem] {
+        queueItems.filter { item in
+            (kindFilter.isEmpty || kindFilter.contains(item.kind)) &&
+            (extFilter.isEmpty || extFilter.contains(item.ext))
         }
-        let contents = (try? fm.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
-        return contents.filter(isImage)
     }
 
-    func setQueueRecursive(_ on: Bool) {
-        queueRecursive = on
-        UserDefaults.standard.set(on, forKey: recursiveDefaultsKey)
+    /// URLs under `folder` down to `maxDepth` subfolder levels (1 = immediate
+    /// contents only). A directory sitting AT the limit has its descendants
+    /// skipped, so the walk never goes deeper than requested.
+    nonisolated static func intakeURLs(in folder: URL, fm: FileManager, maxDepth: Int) -> [URL] {
+        if maxDepth <= 1 {
+            return (try? fm.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        }
+        var acc: [URL] = []
+        let en = fm.enumerator(at: folder, includingPropertiesForKeys: [.isDirectoryKey],
+                               options: [.skipsHiddenFiles, .skipsPackageDescendants])
+        while let url = en?.nextObject() as? URL {
+            acc.append(url)
+            if let en, en.level >= maxDepth,
+               (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                en.skipDescendants()
+            }
+        }
+        return acc
+    }
+
+    func setQueueDepth(_ depth: Int) {
+        queueDepth = max(1, depth)
+        UserDefaults.standard.set(queueDepth, forKey: queueDepthKey)
+        scanQueue()
+    }
+
+    /// Step into a folder shown in the queue: its immediate contents replace the
+    /// current view; the breadcrumb grows so you can step back out.
+    func enterQueueFolder(_ url: URL) {
+        queueDrill.append(url)
+        scanQueue()
+    }
+
+    /// Pop the breadcrumb back to `depth` levels (0 = the watched roots).
+    func popQueueDrill(to depth: Int) {
+        guard depth < queueDrill.count else { return }
+        queueDrill = Array(queueDrill.prefix(max(0, depth)))
         scanQueue()
     }
 
@@ -1170,7 +1491,7 @@ final class TagStore: ObservableObject {
             urls = [fmHome.appendingPathComponent("Downloads", isDirectory: true)]
         }
         queueFolders = urls
-        queueRecursive = UserDefaults.standard.bool(forKey: recursiveDefaultsKey)
+        queueDepth = max(1, UserDefaults.standard.integer(forKey: queueDepthKey))
         showPreview = UserDefaults.standard.bool(forKey: "showPreview")
         knownTags = Set(UserDefaults.standard.stringArray(forKey: "knownTags") ?? [])
         tagOrder = UserDefaults.standard.stringArray(forKey: "tagOrder") ?? []

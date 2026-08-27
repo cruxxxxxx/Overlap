@@ -44,7 +44,7 @@ struct SidebarView: View {
                 Divider()
                 List {
                     if store.mode == .queue {
-                        Text("Select images, then click a tag to apply")
+                        Text("Select files, then click a tag to apply")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
                     ForEach(orderedTree) { top in
@@ -148,16 +148,28 @@ struct SidebarView: View {
                 }
                 .font(.caption)
             }
-            Toggle("Include subfolders", isOn: Binding(
-                get: { store.queueRecursive },
-                set: { store.setQueueRecursive($0) }))
-                .toggleStyle(.checkbox)
+            HStack(spacing: 6) {
+                Text("Subfolders").font(.caption).foregroundStyle(.secondary)
+                Menu(depthLabel(store.queueDepth)) {
+                    Button("Immediate only") { store.setQueueDepth(1) }
+                    Button("1 level deep") { store.setQueueDepth(2) }
+                    Button("2 levels deep") { store.setQueueDepth(3) }
+                    Button("4 levels deep") { store.setQueueDepth(5) }
+                    Button("Unlimited") { store.setQueueDepth(Int.max) }
+                }
+                .menuStyle(.borderlessButton).fixedSize()
                 .font(.caption)
+            }
             HStack {
                 Button("Rescan") { store.scanQueue() }
                 Spacer()
-                Text("\(store.queueItems.count) untagged")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                if store.isScanning {
+                    ProgressView().controlSize(.small)
+                    Text("scanning…").font(.caption2).foregroundStyle(.tertiary)
+                } else {
+                    Text("\(store.queueItems.count) untagged")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
             }
             Button {
                 store.applyQueue()
@@ -171,6 +183,14 @@ struct SidebarView: View {
         }
         .padding(8)
         .tutorialAnchor(.watchedFolders)
+    }
+
+    private func depthLabel(_ d: Int) -> String {
+        switch d {
+        case ..<2: return "Immediate only"
+        case Int.max: return "Unlimited"
+        default: return "\(d - 1) level\(d - 1 == 1 ? "" : "s") deep"
+        }
     }
 
     private func addFolder() {

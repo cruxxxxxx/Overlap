@@ -16,6 +16,9 @@ struct QueryBar: View {
     var body: some View {
         HStack(spacing: 10) {
             matchMenu
+            SavedQueryMenu(canSave: !isEmptyQuery)
+            TypeFilterMenu()
+            TypeFilterChips()
             segments
             Spacer()
             Text("\(store.results.count)")
@@ -162,6 +165,136 @@ struct QueryBar: View {
             Button("Include") { store.include(tag) }
         }
         .help("Click cycles include → exclude → off · right-click for options")
+    }
+}
+
+/// Saved-query menu: apply a stored Venn setup, save the current one, or delete.
+struct SavedQueryMenu: View {
+    @EnvironmentObject var store: TagStore
+    var canSave: Bool
+    @State private var showSave = false
+    @State private var name = ""
+
+    var body: some View {
+        Menu {
+            if store.savedQueries.isEmpty {
+                Text("No saved queries")
+            } else {
+                ForEach(store.savedQueries) { q in
+                    Button(q.name) { store.applySavedQuery(q.id) }
+                }
+                Divider()
+                Menu {
+                    ForEach(store.savedQueries) { q in
+                        Button(q.name, role: .destructive) { store.deleteSavedQuery(q.id) }
+                    }
+                } label: { Label("Delete", systemImage: "trash") }
+            }
+            Divider()
+            Button("Save Current Query…") { name = ""; showSave = true }
+                .disabled(!canSave)
+        } label: {
+            Label("Saved", systemImage: "bookmark")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Save and reuse Venn queries")
+        .alert("Save Query", isPresented: $showSave) {
+            TextField("Name", text: $name)
+            Button("Save") { store.saveCurrentQuery(name: name) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Name this query to reuse it later.")
+        }
+    }
+}
+
+/// Type-filter menu, shared by the query bar and the queue bar. `queue` counts
+/// the intake instead of the catalog.
+struct TypeFilterMenu: View {
+    @EnvironmentObject var store: TagStore
+    var queue = false
+
+    private var activeCount: Int { store.kindFilter.count + store.extFilter.count }
+
+    var body: some View {
+        let kinds = store.kindCounts(queue: queue)
+        let exts = store.extCounts(queue: queue)
+        Menu {
+            Section("Categories") {
+                ForEach(FileKind.allCases) { kind in
+                    if let c = kinds[kind], c > 0 {
+                        Button {
+                            store.setKindFilter(kind, !store.kindFilter.contains(kind))
+                        } label: {
+                            row(kind.label, count: c, on: store.kindFilter.contains(kind))
+                        }
+                    }
+                }
+            }
+            if !exts.isEmpty {
+                Section("Extensions") {
+                    ForEach(exts.prefix(12), id: \.ext) { e in
+                        Button {
+                            store.setExtFilter(e.ext, !store.extFilter.contains(e.ext))
+                        } label: {
+                            row(".\(e.ext)", count: e.count, on: store.extFilter.contains(e.ext))
+                        }
+                    }
+                }
+            }
+            if activeCount > 0 {
+                Divider()
+                Button("Clear type filter") { store.clearTypeFilter() }
+            }
+        } label: {
+            Label(activeCount > 0 ? "Type (\(activeCount))" : "Type",
+                  systemImage: "square.grid.2x2")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Filter by file type")
+    }
+
+    private func row(_ title: String, count: Int, on: Bool) -> some View {
+        HStack {
+            if on { Image(systemName: "checkmark") }
+            Text(title)
+            Spacer()
+            Text("\(count)").foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Removable chips for the active type filter, shared by both bars.
+struct TypeFilterChips: View {
+    @EnvironmentObject var store: TagStore
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(store.kindFilter.sorted { $0.rawValue < $1.rawValue }) { kind in
+                chip(kind.label) { store.setKindFilter(kind, false) }
+            }
+            ForEach(store.extFilter.sorted(), id: \.self) { ext in
+                chip(".\(ext)") { store.setExtFilter(ext, false) }
+            }
+        }
+    }
+
+    private func chip(_ text: String, remove: @escaping () -> Void) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "square.grid.2x2").font(.system(size: 8))
+            Text(text).font(.caption)
+            Button(action: remove) {
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16, height: 16).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 7).padding(.vertical, 3)
+        .background(Color.blue.opacity(0.18), in: Capsule())
+        .overlay(Capsule().stroke(Color.blue.opacity(0.5)))
     }
 }
 
