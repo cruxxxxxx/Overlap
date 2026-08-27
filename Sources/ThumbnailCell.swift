@@ -29,7 +29,7 @@ struct ThumbnailCell: View {
                 } else if !loaded {
                     ProgressView().controlSize(.small)
                 } else {
-                    Image(systemName: "doc")
+                    Image(systemName: item.kind.symbol)
                         .font(.system(size: size * 0.3))
                         .foregroundStyle(.tertiary)
                 }

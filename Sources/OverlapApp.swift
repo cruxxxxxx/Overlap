@@ -30,6 +30,7 @@ struct ContentView: View {
     @EnvironmentObject var store: TagStore
     @State private var showStats = false
     @State private var showPrivacy = false
+    @State private var showSlideshow = false
 
     var body: some View {
         NavigationSplitView {
@@ -96,11 +97,23 @@ struct ContentView: View {
                 }
                 .help("Quick Look selection (or Space)")
                 .disabled(store.results.isEmpty)
+
+                Button { showSlideshow = true } label: {
+                    Label("Slideshow", systemImage: "play.rectangle")
+                }
+                .help("Play the current results as a slideshow")
+                .disabled(store.results.isEmpty)
             }
         }
         .navigationTitle("Overlap")
         .sheet(isPresented: $showStats) { StatsView().environmentObject(store) }
         .sheet(isPresented: $showPrivacy) { PrivacyView().environmentObject(store) }
+        .sheet(isPresented: $showSlideshow) {
+            let start = store.results.firstIndex { store.selection.contains($0.id) } ?? 0
+            SlideshowView(items: store.results, startAt: start)
+                .environmentObject(store)
+                .frame(minWidth: 900, minHeight: 620)
+        }
     }
 
     private func chooseScope() {
