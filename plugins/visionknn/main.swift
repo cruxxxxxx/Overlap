@@ -140,13 +140,24 @@ guard let req = try? decoder.decode(SuggestRequest.self, from: input) else {
     exit(1)
 }
 
-let library = req.library ?? []
+let library = (req.library ?? []).filter { !$0.tags.isEmpty }
 
-// Embed the tagged library (cached). Skip items with no tags or no vector.
+// Progress on stderr — Overlap surfaces it in the suggestion bar. Only reported
+// while actually embedding (a cold/changed library), so a warm run stays silent.
+func reportProgress(_ done: Int, _ total: Int) {
+    FileHandle.standardError.write(Data("Building suggestion index… \(done)/\(total)\n".utf8))
+}
+
+// Embed the tagged library (cached). Skip items with no vector (unreadable).
 var refVecs: [(vec: [Float], tags: [String])] = []
-for item in library where !item.tags.isEmpty {
+var lastReported = 0
+for (i, item) in library.enumerated() {
     if let v = embedCached(path: item.path, modDate: item.modDate) {
         refVecs.append((v, item.tags))
+    }
+    if freshCount > lastReported && freshCount % 25 == 0 {
+        reportProgress(i + 1, library.count)
+        lastReported = freshCount
     }
 }
 

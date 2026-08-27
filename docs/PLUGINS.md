@@ -109,6 +109,16 @@ unsandboxed, so plugins have normal filesystem access).
 The authoritative types live in
 [`Sources/PluginContract.swift`](../Sources/PluginContract.swift).
 
+### Progress (stderr, optional)
+
+A plugin that does heavy first-run work (embedding a whole library, building an
+index) can write **human-readable progress lines to stderr** while it works.
+Overlap streams them and shows the latest line in the suggestion bar (e.g.
+`Building suggestion index… 300/4000`). One line per update, newline-terminated;
+stdout stays reserved for the single JSON response. Emitting nothing is fine —
+plugins with no heavy phase just return their JSON. `visionknn` does this only on a
+cold/changed library, staying silent on warm cache hits.
+
 ---
 
 ## Similarity plugins (`wantsLibrary`)
