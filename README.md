@@ -29,8 +29,8 @@ folders), not just photos.
 | Explore — Venn query | Tags — grid + preview |
 |---|---|
 | ![Explore](docs/screenshots/explore-venn.png) | ![Grid](docs/screenshots/grid-preview.png) |
-| **Queue — intake & drill** | **Suggestions — plugins** |
-| ![Queue](docs/screenshots/queue.png) | ![Suggest](docs/screenshots/suggest.png) |
+| **Queue — intake & drill** | **Explore — tag map** |
+| ![Queue](docs/screenshots/queue.png) | ![Tag map](docs/screenshots/tag-map.png) |
 
 ---
 
