@@ -4,9 +4,11 @@
   "version": "1.0.0",
   "protocolVersion": 1,
   "exec": "visionknn",
-  "handles": ["image"],
+  "handles": [
+    "image"
+  ],
   "batch": true,
   "wantsKnownTags": false,
   "wantsLibrary": true,
-  "timeoutMs": 120000
+  "timeoutMs": 600000
 }

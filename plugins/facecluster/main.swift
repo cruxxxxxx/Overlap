@@ -279,7 +279,7 @@ for it in (req.library ?? []) { modByPath[it.path] = it.modDate; tagsByPath[it.p
 for f in req.files { modByPath[f.path] = f.modDate; tagsByPath[f.path, default: []].formUnion(f.tags) }
 let need = tagsByPath.map { (path: $0.key, modDate: modByPath[$0.key] ?? nil, tags: Array($0.value)) }
 syncIndex(items: need) { done, total in
-    FileHandle.standardError.write(Data("Building face index… \(done)/\(total)\n".utf8))
+    FileHandle.standardError.write(Data("Indexing faces… \(done)/\(total) new\n".utf8))
 }
 
 let names = clusterNames()

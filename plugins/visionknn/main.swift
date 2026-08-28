@@ -169,7 +169,7 @@ guard let req = try? decoder.decode(SuggestRequest.self, from: input) else {
 var items = (req.library ?? []).map { SyncItem(path: $0.path, modDate: $0.modDate, tags: $0.tags) }
 items.append(contentsOf: req.files.map { SyncItem(path: $0.path, modDate: $0.modDate, tags: $0.tags) })
 syncIndex(items: items) { done, total in
-    FileHandle.standardError.write(Data("Building suggestion index… \(done)/\(total)\n".utf8))
+    FileHandle.standardError.write(Data("Indexing images… \(done)/\(total) new\n".utf8))
 }
 
 // Memory-map the vector blob for querying (near-zero load; OS pages in on demand).
