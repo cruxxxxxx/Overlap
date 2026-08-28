@@ -22,6 +22,41 @@ struct OverlapApp: App {
                     NotificationCenter.default.post(name: .overlapStartTutorial, object: nil)
                 }
             }
+            CommandMenu("Plugins") {
+                let plugins = PluginRegistry.discover()
+                    .sorted { $0.manifest.name < $1.manifest.name }
+                if plugins.isEmpty {
+                    Text("No plugins installed")
+                } else {
+                    ForEach(plugins) { p in
+                        Toggle(p.manifest.name, isOn: Binding(
+                            get: { !store.disabledPluginIDs.contains(p.id) },
+                            set: { on in
+                                if on { store.disabledPluginIDs.remove(p.id) }
+                                else { store.disabledPluginIDs.insert(p.id) }
+                            }))
+                    }
+                }
+                Divider()
+                Button(store.warmingUp ? "Warming Up Index…" : "Warm Up Suggestion Index") {
+                    store.warmUpPlugins(force: true)
+                }
+                .disabled(store.warmingUp)
+                Divider()
+                Button("Open Plugins Folder") {
+                    if let dir = PluginRegistry.userPluginsDir() {
+                        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(dir)
+                    }
+                }
+                Button("Open Plugin Cache & Config") {
+                    let dir = FileManager.default
+                        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("Overlap/PluginCache", isDirectory: true)
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(dir)
+                }
+            }
         }
     }
 }
@@ -39,6 +74,22 @@ struct ContentView: View {
         } detail: {
             ResultsGridView()
         }
+        // Thin, non-blocking strip while plugin indexes warm up in the background.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if store.warmingUp {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(store.warmupProgress ?? "Preparing suggestions…")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                }
+                .padding(.horizontal, 12).padding(.vertical, 4)
+                .background(.bar)
+                .overlay(Divider(), alignment: .bottom)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: store.warmingUp)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {

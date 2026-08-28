@@ -75,6 +75,14 @@ final class TagStore: ObservableObject {
     /// Persisted; nil with grouping on falls back to all enabled plugins.
     @Published private(set) var groupPluginID: String? =
         UserDefaults.standard.string(forKey: "groupPluginID")
+
+    /// Background plugin index warm-up: after the catalog loads, the similarity
+    /// plugins are fed the full library with NO target files, so they build/refresh
+    /// their persistent indexes off the user's critical path. A thin progress
+    /// strip at the top of the window is the only visible surface.
+    @Published private(set) var warmingUp = false
+    @Published private(set) var warmupProgress: String?
+    private var lastWarmedSig = ""
     /// Suggestion sources the user has switched off (plugin ids). Persisted.
     @Published var disabledPluginIDs: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: "disabledPluginIDs") ?? []) {
@@ -255,6 +263,9 @@ final class TagStore: ObservableObject {
                 self.refreshVisible()
                 self.catalogQuery.enableUpdates()
                 self.saveCache()
+                // Catalog is loaded — build/refresh the plugins' persistent indexes
+                // in the background so the first Suggest isn't the slow one.
+                self.warmUpPlugins()
             }
         }
     }
@@ -1120,9 +1131,9 @@ final class TagStore: ObservableObject {
     /// `suggestTags` supersedes anything still in flight.
     func autoSuggestSelection() {
         autoSuggestTask?.cancel()
-        // Never run a selection suggest while a queue-wide run is in flight: two
-        // concurrent plugin processes would race each other's persistent indexes.
-        guard !queueSuggesting else { return }
+        // Never run a selection suggest while a queue-wide run or index warm-up is
+        // in flight: concurrent plugin processes would race the persistent indexes.
+        guard !queueSuggesting, !warmingUp else { return }
         guard autoSuggestEnabled else { clearSuggestions(); return }
         let items = results.filter { selection.contains($0.id) }
         guard !items.isEmpty else { clearSuggestions(); return }
@@ -1211,6 +1222,7 @@ final class TagStore: ObservableObject {
     /// Run the plugins over the ENTIRE queue and publish `queueSuggestions` +
     /// the derived `queueSections`. Powers the "group by suggestions" view.
     func suggestQueue() {
+        guard !warmingUp else { return }   // warm-up completion re-triggers this
         let items = queueItems.filter { $0.kind != .folder }
         guard !items.isEmpty else {
             queueSuggestions = []; queueSections = []; return
@@ -1279,6 +1291,40 @@ final class TagStore: ObservableObject {
             if !queueSuggesting { suggestQueue() }
         } else {
             rebuildQueueSections()
+        }
+    }
+
+    /// Kick a background index warm-up (no target files — plugins just sync their
+    /// persistent indexes over the library). Skipped when the corpus hasn't
+    /// changed since the last warm-up, unless forced from the Plugins menu.
+    func warmUpPlugins(force: Bool = false) {
+        guard !warmingUp, !queueSuggesting else { return }
+        let sig = corpusSignature()
+        guard force || sig != lastWarmedSig else { return }
+        warmingUp = true
+        warmupProgress = nil
+        let library = taggedLibrary.map { LibraryItem(path: $0.url.path, kind: $0.kind.rawValue,
+                                                      tags: $0.tags, modDate: $0.modDate) }
+        lastSentCorpusSig = sig   // this run delivers the corpus; later runs send []
+        let known = Array(knownTags)
+        let disabled = disabledPluginIDs
+        Task.detached(priority: .utility) {
+            _ = await SuggestionEngine.run(files: [], library: library, knownTags: known,
+                                           kinds: [.image], disabledIDs: disabled,
+                                           onProgress: { [weak self] line in
+                Task { @MainActor in self?.warmupProgress = line }
+            })
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.warmingUp = false
+                self.warmupProgress = nil
+                self.lastWarmedSig = sig
+                // Anything the warm-up blocked can go now, against a warm index.
+                if self.mode == .queue && self.queueGrouping && self.queueSuggestions.isEmpty {
+                    self.suggestQueue()
+                }
+                self.autoSuggestSelection()
+            }
         }
     }
 
