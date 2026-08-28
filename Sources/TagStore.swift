@@ -70,6 +70,11 @@ final class TagStore: ObservableObject {
     /// "Group by suggestions" toggle for queue mode. Persisted.
     @Published private(set) var queueGrouping =
         UserDefaults.standard.bool(forKey: "queueGrouping")
+    /// The single plugin whose suggestions drive the grouped view (one source at
+    /// a time keeps sections coherent — faces OR visual neighbors, not a mix).
+    /// Persisted; nil with grouping on falls back to all enabled plugins.
+    @Published private(set) var groupPluginID: String? =
+        UserDefaults.standard.string(forKey: "groupPluginID")
     /// Suggestion sources the user has switched off (plugin ids). Persisted.
     @Published var disabledPluginIDs: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: "disabledPluginIDs") ?? []) {
@@ -1145,6 +1150,7 @@ final class TagStore: ObservableObject {
     /// persist their corpus index, so whichever path syncs the library first
     /// covers the other — the second caller correctly sends an empty library.
     private func runSuggestionEngine(items: [FileItem],
+                                     onlyPlugin: String? = nil,
                                      onProgress: @escaping @Sendable (String) -> Void,
                                      completion: @escaping @MainActor ([TagSuggestion]) -> Void) {
         let files = items.map { RequestFile(path: $0.url.path, kind: $0.kind.rawValue,
@@ -1162,7 +1168,10 @@ final class TagStore: ObservableObject {
         lastSentCorpusSig = sig
         let known = Array(knownTags)
         let kinds = Set(items.map(\.kind))
-        let disabled = disabledPluginIDs
+        var disabled = disabledPluginIDs
+        if let onlyPlugin {   // restrict this run to a single source
+            disabled.formUnion(PluginRegistry.discover().map(\.id).filter { $0 != onlyPlugin })
+        }
 
         Task.detached(priority: .userInitiated) {
             let merged = await SuggestionEngine.run(files: files, library: library,
@@ -1211,7 +1220,7 @@ final class TagStore: ObservableObject {
         queueSuggesting = true
         queueSuggestProgress = nil
 
-        runSuggestionEngine(items: items, onProgress: { [weak self] line in
+        runSuggestionEngine(items: items, onlyPlugin: groupPluginID, onProgress: { [weak self] line in
             Task { @MainActor in
                 guard let self, self.queueSuggestToken == token else { return }
                 self.queueSuggestProgress = line
@@ -1261,15 +1270,29 @@ final class TagStore: ObservableObject {
         rebuildQueueSections()
     }
 
-    /// Toggle the grouped view; entering it with no suggestions kicks off a run.
+    /// Toggle the grouped view; entering it with no suggestions kicks off a run
+    /// (unless one is already in flight — its completion will build the sections).
     func setQueueGrouping(_ on: Bool) {
         queueGrouping = on
         UserDefaults.standard.set(on, forKey: "queueGrouping")
         if on && queueSuggestions.isEmpty {
-            suggestQueue()
+            if !queueSuggesting { suggestQueue() }
         } else {
             rebuildQueueSections()
         }
+    }
+
+    /// Pick the single plugin that drives grouping (nil = grouping off). Changing
+    /// source invalidates the previous run's suggestions and re-runs.
+    func setGroupPlugin(_ id: String?) {
+        groupPluginID = id
+        UserDefaults.standard.set(id, forKey: "groupPluginID")
+        guard let _ = id else { setQueueGrouping(false); return }
+        queueSuggestions = []
+        queueSections = []
+        queueGrouping = true
+        UserDefaults.standard.set(true, forKey: "queueGrouping")
+        suggestQueue()
     }
 
     func removeTag(_ tag: String, from urls: [URL]) {

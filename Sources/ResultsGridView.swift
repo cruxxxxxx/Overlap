@@ -65,7 +65,9 @@ struct ResultsGridView: View {
 
     private var quickTagBar: some View {
         VStack(spacing: 0) {
-            if store.suggesting || !store.suggestions.isEmpty {
+            // Always shown in queue mode so the Group control is reachable
+            // before any selection; elsewhere only when there's chip content.
+            if store.mode == .queue || store.suggesting || !store.suggestions.isEmpty {
                 Divider()
                 suggestedRow
             }
@@ -131,6 +133,15 @@ struct ResultsGridView: View {
                 .popover(isPresented: $showSuggestionSources, arrowEdge: .top) {
                     suggestionSourcesPopover
                 }
+                if store.mode == .queue {
+                    groupMenu
+                    if store.queueSuggesting {
+                        ProgressView().controlSize(.small)
+                        if let p = store.queueSuggestProgress {
+                            Text(p).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                    }
+                }
                 if store.suggesting {
                     ProgressView().controlSize(.small)
                     if let progress = store.suggestProgress, !progress.isEmpty {
@@ -182,6 +193,44 @@ struct ResultsGridView: View {
 
     /// The ✨ hold-popover: toggle individual suggestion sources (plugins).
     /// Suggestions themselves populate automatically on selection change.
+    /// Queue-mode "Group by" control: pick ONE plugin whose suggestions section
+    /// the queue (mixing sources would interleave unrelated groups), or Off.
+    private var groupMenu: some View {
+        Menu {
+            Button {
+                store.setGroupPlugin(nil)
+            } label: {
+                if !store.queueGrouping { Image(systemName: "checkmark") }
+                Text("Off")
+            }
+            Divider()
+            ForEach(PluginRegistry.discover().filter { !store.disabledPluginIDs.contains($0.id) },
+                    id: \.id) { p in
+                Button {
+                    store.setGroupPlugin(p.id)
+                } label: {
+                    if store.queueGrouping && store.groupPluginID == p.id {
+                        Image(systemName: "checkmark")
+                    }
+                    Text(p.manifest.name)
+                }
+            }
+            if store.queueGrouping {
+                Divider()
+                Button("Refresh") { store.suggestQueue() }
+                    .disabled(store.queueSuggesting)
+            }
+        } label: {
+            Label(store.queueGrouping ? "Grouped" : "Group",
+                  systemImage: "sparkles.rectangle.stack")
+                .font(.caption)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .foregroundStyle(store.queueGrouping ? Color.accentColor : Color.secondary)
+        .help("Group the queue by one plugin's suggestions")
+    }
+
     private var suggestionSourcesPopover: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Suggestion sources").font(.caption).foregroundStyle(.secondary)
@@ -571,26 +620,6 @@ struct ResultsGridView: View {
             TypeFilterMenu(queue: true)
             TypeFilterChips()
             Spacer()
-            // Group-by-suggestions toggle + its live progress / refresh.
-            if store.queueSuggesting {
-                ProgressView().controlSize(.small)
-                if let p = store.queueSuggestProgress {
-                    Text(p).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            Toggle(isOn: Binding(get: { store.queueGrouping },
-                                 set: { store.setQueueGrouping($0) })) {
-                Label("Group", systemImage: "sparkles.rectangle.stack")
-            }
-            .toggleStyle(.button)
-            .help("Group the queue by suggested tags (faces, similar images)")
-            if store.queueGrouping {
-                Button { store.suggestQueue() } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .disabled(store.queueSuggesting)
-                .help("Re-run suggestions over the queue")
-            }
             SortMenu()
             Slider(value: $thumbSize, in: 90...280).frame(width: 120)
             Button { store.applyQueue() } label: {
