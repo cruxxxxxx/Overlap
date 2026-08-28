@@ -35,9 +35,12 @@ enum PluginRegistry {
             options: [.skipsHiddenFiles]) else { return [] }
 
         return subdirs.compactMap { dir in
-            guard (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            // Plugins are often symlinked in (plugins/install.sh does); resolve
+            // so the directory and containment checks see the real location.
+            let real = dir.resolvingSymlinksInPath()
+            guard (try? real.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             else { return nil }
-            let manifestURL = dir.appendingPathComponent("manifest.json")
+            let manifestURL = real.appendingPathComponent("manifest.json")
             guard let data = try? Data(contentsOf: manifestURL) else { return nil }
             guard let manifest = try? PluginCoder.decoder.decode(PluginManifest.self, from: data) else {
                 NSLog("[plugins] skip \(dir.lastPathComponent): manifest.json won't decode")
@@ -47,10 +50,10 @@ enum PluginRegistry {
                 NSLog("[plugins] skip \(manifest.id): protocolVersion \(manifest.protocolVersion) ≠ \(PluginProtocol.version)")
                 return nil
             }
-            let execURL = dir.appendingPathComponent(manifest.exec).standardizedFileURL
-            // Sanity guard: the exec must live under the plugin's own dir, so a
-            // manifest can't point `exec` at an arbitrary absolute path.
-            guard execURL.path.hasPrefix(dir.standardizedFileURL.path + "/") else {
+            // Sanity guard: the exec must live under the plugin's own (resolved)
+            // dir, so a manifest can't point `exec` at an arbitrary path.
+            let execURL = real.appendingPathComponent(manifest.exec).standardizedFileURL
+            guard execURL.resolvingSymlinksInPath().path.hasPrefix(real.path + "/") else {
                 NSLog("[plugins] skip \(manifest.id): exec escapes the plugin dir")
                 return nil
             }
@@ -58,7 +61,7 @@ enum PluginRegistry {
                 NSLog("[plugins] skip \(manifest.id): exec missing or not executable at \(execURL.path)")
                 return nil
             }
-            return DiscoveredPlugin(manifest: manifest, dir: dir, execURL: execURL)
+            return DiscoveredPlugin(manifest: manifest, dir: real, execURL: execURL)
         }
     }
 }
