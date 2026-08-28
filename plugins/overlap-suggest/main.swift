@@ -46,16 +46,68 @@ struct SuggestResponse: Codable {
     let suggestions: [RawSuggestion]
 }
 
-// MARK: - Tunables (config.json arrives in phase 2)
+// MARK: - Config (config.json in the cache dir; defaults written on first run)
 
-let K = 7                       // kNN neighbors
-let MIN_CONFIDENCE = 0.30
-let MAX_TAGS_PER_FILE = 6
-let JOIN_THRESHOLD: Float = 0.84
-let NAME_MIN_SHARE = 0.5
-let NAME_MIN_CONCENTRATION = 0.6
-let W_KNN = 1.0                 // noisy-OR channel weights
-let W_FACE = 1.0
+struct Config: Codable {
+    var k = 7                        // kNN neighbors
+    var minConfidence = 0.30
+    var maxTagsPerFile = 6
+    var highPrecisionMode = false    // true -> threshold 0.60 (research: P=.937/R=.616)
+    var lambda = 0.2                 // cooc rerank strength (research: +3pts precision)
+    var mutexFloor = 0.02            // pair "never co-occurs" ceiling for mutex-drop
+    var minSupport = 5               // corpus uses a tag must have to join cooc/mutex
+    var joinThreshold: Float = 0.84  // face-cluster join cosine
+    var nameMinShare = 0.5           // cluster-name learning: share of cluster
+    var nameMinConcentration = 0.6   //   ... and of the tag's global use
+    var labelEnsembleAlpha = 0.3     // kNN sim = (1-α)·FeaturePrint + α·classifier-labels
+    var faceQualityMin: Float = 0.2  // faces below this quality don't join clusters
+    var clsMapMinP = 0.5             // learned P(userTag|label) acceptance
+    var clsMapMinSupport = 8         //   ... and images-with-label support
+    var coldStartMinTagged = 20      // corpus below this -> cold-start mode
+    var weights = Weights()
+    var signals = Signals()
+    struct Weights: Codable {
+        var knn = 1.0; var face = 1.0; var cls = 0.65; var ocr = 0.95
+        init() {}
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            knn = try c.decodeIfPresent(Double.self, forKey: .knn) ?? 1.0
+            face = try c.decodeIfPresent(Double.self, forKey: .face) ?? 1.0
+            cls = try c.decodeIfPresent(Double.self, forKey: .cls) ?? 0.65
+            ocr = try c.decodeIfPresent(Double.self, forKey: .ocr) ?? 0.95
+        }
+    }
+    struct Signals: Codable {
+        var classify = true; var ocr = true; var faces = true; var aesthetics = true
+        init() {}
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            classify = try c.decodeIfPresent(Bool.self, forKey: .classify) ?? true
+            ocr = try c.decodeIfPresent(Bool.self, forKey: .ocr) ?? true
+            faces = try c.decodeIfPresent(Bool.self, forKey: .faces) ?? true
+            aesthetics = try c.decodeIfPresent(Bool.self, forKey: .aesthetics) ?? true
+        }
+    }
+
+    init() {}
+    // Tolerant decode: a config.json from an older version keeps working — missing
+    // keys fall back to defaults instead of resetting the whole file.
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        func f<T: Decodable>(_ k: CodingKeys, _ def: T) -> T {
+            ((try? c.decodeIfPresent(T.self, forKey: k)) ?? nil) ?? def
+        }
+        k = f(.k, 7); minConfidence = f(.minConfidence, 0.30)
+        maxTagsPerFile = f(.maxTagsPerFile, 6); highPrecisionMode = f(.highPrecisionMode, false)
+        lambda = f(.lambda, 0.2); mutexFloor = f(.mutexFloor, 0.02); minSupport = f(.minSupport, 5)
+        joinThreshold = f(.joinThreshold, 0.84); nameMinShare = f(.nameMinShare, 0.5)
+        nameMinConcentration = f(.nameMinConcentration, 0.6)
+        labelEnsembleAlpha = f(.labelEnsembleAlpha, 0.3); faceQualityMin = f(.faceQualityMin, 0.2)
+        clsMapMinP = f(.clsMapMinP, 0.5); clsMapMinSupport = f(.clsMapMinSupport, 8)
+        coldStartMinTagged = f(.coldStartMinTagged, 20)
+        weights = f(.weights, Weights()); signals = f(.signals, Signals())
+    }
+}
 let SOURCE = "overlap-suggest"
 
 // MARK: - Vision helpers
@@ -79,10 +131,11 @@ func fpVector(_ request: VNGenerateImageFeaturePrintRequest) -> [Float]? {
     return vec
 }
 
-/// Faceprint vectors from a performed private request's results, or [].
-func faceVectors(_ request: VNRequest) -> [[Float]] {
+/// Faceprint vectors (+bboxes for quality matching) from a performed private
+/// request's results, or [].
+func faceVectors(_ request: VNRequest) -> [(vec: [Float], bbox: CGRect)] {
     guard let faces = request.results as? [VNFaceObservation] else { return [] }
-    var out: [[Float]] = []
+    var out: [(vec: [Float], bbox: CGRect)] = []
     for obs in faces {
         guard let fp = obs.value(forKey: "faceprint") as? NSObject,
               let count = fp.value(forKey: "elementCount") as? Int,
@@ -94,9 +147,30 @@ func faceVectors(_ request: VNRequest) -> [[Float]] {
             for i in 0..<min(count, src.count) { vec[i] = src[i] }
         }
         normalize(&vec)
-        out.append(vec)
+        out.append((vec, obs.boundingBox))
     }
     return out
+}
+
+func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
+    let inter = a.intersection(b)
+    guard !inter.isNull, inter.width > 0, inter.height > 0 else { return 0 }
+    let ia = inter.width * inter.height
+    let ua = a.width * a.height + b.width * b.height - ia
+    return ua > 0 ? ia / ua : 0
+}
+
+/// Tokenize OCR output: lowercase words, length >= 3, deduped.
+func ocrTokens(_ request: VNRecognizeTextRequest) -> [String] {
+    guard let results = request.results else { return [] }
+    var tokens = Set<String>()
+    for obs in results {
+        guard let text = obs.topCandidates(1).first?.string else { continue }
+        for word in text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+            if word.count >= 3 { tokens.insert(String(word)) }
+        }
+    }
+    return Array(tokens)
 }
 
 func cosine(_ a: [Float], _ b: [Float]) -> Float {
@@ -118,14 +192,16 @@ func signature(path: String, modDate: Date?) -> String {
 // MARK: - Persistent state
 
 struct FaceRef: Codable { var row: Int; var cluster: Int; var quality: Float? }
-struct LabelRef: Codable { var i: Int; var c: Float }   // interned classifier label (phase 3)
+struct LabelRef: Codable { var i: Int; var c: Float }   // interned classifier label
+struct AesRef: Codable { var score: Float; var utility: Bool }
 struct ImageRec: Codable {
     var sig: String
     var tags: [String]
     var fpRow: Int?          // nil = FeaturePrint not yet computed
-    var faces: [FaceRef]?    // nil = face pass not yet run
-    var labels: [LabelRef]?  // phase 3
-    var ocr: [Int]?          // phase 3
+    var faces: [FaceRef]?    // nil = face pass not yet run (cluster -1 = quality-gated)
+    var labels: [LabelRef]?  // nil = classifier not yet run (interned via labelVocab)
+    var ocr: [Int]?          // nil = OCR not yet run (interned via tokenVocab)
+    var aes: AesRef?         // nil = aesthetics not run / OS too old
 }
 struct ClusterState: Codable { var sum: [Float]; var count: Int }
 struct Meta: Codable {
@@ -156,6 +232,16 @@ let cacheDir: URL = {
 let metaURL = cacheDir.appendingPathComponent("meta.json")
 let fpBinURL = cacheDir.appendingPathComponent("featureprint.bin")
 let faceBinURL = cacheDir.appendingPathComponent("faces.bin")
+let configURL = cacheDir.appendingPathComponent("config.json")
+
+let config: Config = {
+    if let d = try? Data(contentsOf: configURL),
+       let c = try? JSONDecoder().decode(Config.self, from: d) { return c }
+    let c = Config()
+    let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let d = try? enc.encode(c) { try? d.write(to: configURL) }
+    return c
+}()
 
 func stderrLine(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
 
@@ -237,7 +323,7 @@ func centroid(_ c: ClusterState) -> [Float] {
 /// Assign a face vector to the nearest cluster (or a new one), updating centroids.
 func assignCluster(_ vec: [Float]) -> Int {
     var best = -1
-    var bestSim = JOIN_THRESHOLD
+    var bestSim = config.joinThreshold
     for (id, c) in meta.clusters {
         let s = cosine(vec, centroid(c))
         if s >= bestSim { bestSim = s; best = id }
@@ -257,9 +343,28 @@ func assignCluster(_ vec: [Float]) -> Int {
 // MARK: - Index sync (one decode per image; per-signal backfill)
 
 let faceprintClass = NSClassFromString("VNCreateFaceprintRequest") as? NSObject.Type
+var labelIndex: [String: Int] = [:]   // labelVocab lookup, built once
+var tokenIndex: [String: Int] = [:]
+
+func internLabel(_ s: String) -> Int {
+    if let i = labelIndex[s] { return i }
+    meta.labelVocab.append(s); labelIndex[s] = meta.labelVocab.count - 1
+    return meta.labelVocab.count - 1
+}
+func internToken(_ s: String) -> Int {
+    if let i = tokenIndex[s] { return i }
+    meta.tokenVocab.append(s); tokenIndex[s] = meta.tokenVocab.count - 1
+    return meta.tokenVocab.count - 1
+}
+
+var aestheticsAvailable: Bool {
+    if #available(macOS 15, *) { return config.signals.aesthetics } else { return false }
+}
 
 func syncIndex(items: [(path: String, modDate: Date?, tags: [String])],
                progress: (Int, Int) -> Void) {
+    for (i, s) in meta.labelVocab.enumerated() { labelIndex[s] = i }
+    for (i, s) in meta.tokenVocab.enumerated() { tokenIndex[s] = i }
     for url in [fpBinURL, faceBinURL] where !FileManager.default.fileExists(atPath: url.path) {
         FileManager.default.createFile(atPath: url.path, contents: nil)
     }
@@ -271,7 +376,12 @@ func syncIndex(items: [(path: String, modDate: Date?, tags: [String])],
     // Work = sig changed (everything) or an enabled signal is missing (backfill).
     func needsWork(_ rec: ImageRec?, _ sig: String) -> Bool {
         guard let rec, rec.sig == sig else { return true }
-        return rec.fpRow == nil || (rec.faces == nil && faceprintClass != nil)
+        if rec.fpRow == nil { return true }
+        if config.signals.faces && faceprintClass != nil && rec.faces == nil { return true }
+        if config.signals.classify && rec.labels == nil { return true }
+        if config.signals.ocr && rec.ocr == nil { return true }
+        if aestheticsAvailable && rec.aes == nil { return true }
+        return false
     }
     let todo = items.filter { needsWork(meta.images[$0.path], signature(path: $0.path, modDate: $0.modDate)) }
     var done = 0
@@ -283,9 +393,10 @@ func syncIndex(items: [(path: String, modDate: Date?, tags: [String])],
             if e.tags != it.tags { meta.images[it.path]?.tags = it.tags }
             continue
         }
-        let sigChanged = existing?.sig != sig
-        var rec = (sigChanged || existing == nil)
-            ? ImageRec(sig: sig, tags: it.tags, fpRow: nil, faces: nil, labels: nil, ocr: nil)
+        let sigChanged = existing == nil || existing!.sig != sig
+        var rec = sigChanged
+            ? ImageRec(sig: sig, tags: it.tags, fpRow: nil, faces: nil,
+                       labels: nil, ocr: nil, aes: nil)
             : existing!
         rec.sig = sig
         rec.tags = it.tags
@@ -294,12 +405,31 @@ func syncIndex(items: [(path: String, modDate: Date?, tags: [String])],
         var requests: [VNRequest] = []
         var fpReq: VNGenerateImageFeaturePrintRequest?
         var faceReq: VNRequest?
+        var classifyReq: VNClassifyImageRequest?
+        var textReq: VNRecognizeTextRequest?
+        var qualityReq: VNDetectFaceCaptureQualityRequest?
+        var aesReq: VNRequest?
         if rec.fpRow == nil {
             let r = VNGenerateImageFeaturePrintRequest(); fpReq = r; requests.append(r)
         }
-        if rec.faces == nil, let cls = faceprintClass, let r = cls.init() as? VNRequest {
+        if config.signals.faces, rec.faces == nil, let cls = faceprintClass,
+           let r = cls.init() as? VNRequest {
             faceReq = r; requests.append(r)
+            let q = VNDetectFaceCaptureQualityRequest(); qualityReq = q; requests.append(q)
         }
+        if config.signals.classify, rec.labels == nil {
+            let r = VNClassifyImageRequest(); classifyReq = r; requests.append(r)
+        }
+        if config.signals.ocr, rec.ocr == nil {
+            let r = VNRecognizeTextRequest()
+            r.recognitionLevel = .fast
+            r.usesLanguageCorrection = false
+            textReq = r; requests.append(r)
+        }
+        if #available(macOS 15, *), aestheticsAvailable, rec.aes == nil {
+            let r = VNCalculateImageAestheticsScoresRequest(); aesReq = r; requests.append(r)
+        }
+
         if !requests.isEmpty {
             let handler = VNImageRequestHandler(url: URL(fileURLWithPath: it.path), options: [:])
             do {
@@ -323,16 +453,47 @@ func syncIndex(items: [(path: String, modDate: Date?, tags: [String])],
                 }
             }
             if let faceReq {
-                let vecs = faceVectors(faceReq)
-                if meta.faceDim == 0, let f = vecs.first { meta.faceDim = f.count }
+                let found = faceVectors(faceReq)
+                if meta.faceDim == 0, let f = found.first { meta.faceDim = f.vec.count }
+                // Per-face capture quality via bbox IoU against the quality request.
+                let qualityObs = (qualityReq?.results ?? [])
+                func qualityFor(_ bbox: CGRect) -> Float? {
+                    var best: (q: Float, iou: CGFloat)? = nil
+                    for obs in qualityObs {
+                        let overlap = iou(bbox, obs.boundingBox)
+                        if overlap > 0.5, let q = obs.faceCaptureQuality,
+                           overlap > (best?.iou ?? 0.5) { best = (q, overlap) }
+                    }
+                    return best?.q
+                }
                 var refs: [FaceRef] = []
-                for v in vecs where v.count == meta.faceDim {
+                for f in found where f.vec.count == meta.faceDim {
                     try? faceFH.seek(toOffset: UInt64(meta.faceRows * meta.faceDim * 4))
-                    faceFH.write(v.withUnsafeBytes { Data($0) })
-                    refs.append(FaceRef(row: meta.faceRows, cluster: assignCluster(v), quality: nil))
+                    faceFH.write(f.vec.withUnsafeBytes { Data($0) })
+                    let q = qualityFor(f.bbox)
+                    // Low-quality faces are the bridges that over-merge clusters:
+                    // store the row but keep them out of clustering (cluster -1).
+                    let cluster = (q ?? 1.0) >= config.faceQualityMin ? assignCluster(f.vec) : -1
+                    refs.append(FaceRef(row: meta.faceRows, cluster: cluster, quality: q))
                     meta.faceRows += 1
                 }
                 rec.faces = refs
+            }
+            if let classifyReq {
+                // Calibrated high-precision filter (the researched cold-start lever).
+                let obs = (classifyReq.results ?? [])
+                    .filter { $0.hasMinimumRecall(0.01, forPrecision: 0.9) }
+                rec.labels = obs.map { LabelRef(i: internLabel($0.identifier), c: $0.confidence) }
+            }
+            if let textReq {
+                rec.ocr = ocrTokens(textReq).map(internToken)
+            }
+            if #available(macOS 15, *), let aesReq = aesReq as? VNCalculateImageAestheticsScoresRequest {
+                if let a = aesReq.results?.first {
+                    rec.aes = AesRef(score: a.overallScore, utility: a.isUtility)
+                } else {
+                    rec.aes = AesRef(score: 0, utility: false)  // present-but-empty
+                }
             }
         }
         meta.images[it.path] = rec
@@ -363,7 +524,7 @@ func clusterNames() -> [Int: String] {
         for (tag, inC) in clusterTagCount[c] ?? [:] {
             let share = Double(inC) / Double(max(1, size))
             let concentration = Double(inC) / Double(max(1, globalTagCount[tag] ?? 1))
-            if share >= NAME_MIN_SHARE, concentration >= NAME_MIN_CONCENTRATION, inC > bestScore {
+            if share >= config.nameMinShare, concentration >= config.nameMinConcentration, inC > bestScore {
                 bestScore = inC; bestTag = tag
             }
         }
@@ -397,6 +558,26 @@ syncIndex(items: need) { done, total in
 var out: [RawSuggestion] = []
 let names = clusterNames()
 
+// ---- Co-occurrence model, recomputed from the persisted corpus each run
+// (<10ms at ~4k images; no staleness). support[t] = images carrying t;
+// pair[t][s] = images carrying both. P(t|s) = pair / support[s].
+var coocSupport: [String: Int] = [:]
+var coocPair: [String: [String: Int]] = [:]
+for (_, rec) in meta.images where !rec.tags.isEmpty {
+    let tags = Array(Set(rec.tags))
+    for t in tags { coocSupport[t, default: 0] += 1 }
+    for i in 0..<tags.count {
+        for j in 0..<tags.count where i != j {
+            coocPair[tags[i], default: [:]][tags[j], default: 0] += 1
+        }
+    }
+}
+func pCond(_ t: String, given s: String) -> Double {
+    guard let sup = coocSupport[s], sup > 0 else { return 0 }
+    return Double(coocPair[t]?[s] ?? 0) / Double(sup)
+}
+func hasSupport(_ t: String) -> Bool { (coocSupport[t] ?? 0) >= config.minSupport }
+
 // mmap both blobs.
 func mapBlob(_ url: URL) -> (ptr: UnsafeMutableRawPointer, size: Int)? {
     guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -413,12 +594,74 @@ defer {
     if let b = faceBlob { munmap(b.ptr, b.size) }
 }
 
-// kNN reference rows: every tagged image with a valid fp row.
-var refs: [(row: Int, tags: [String])] = []
+// kNN reference rows: every tagged image with a valid fp row (+ its classifier
+// label vector for the ensemble similarity).
+var refs: [(row: Int, tags: [String], labels: [Int: Float])] = []
 if meta.fpDim > 0 {
     for (_, rec) in meta.images {
-        if let r = rec.fpRow, r >= 0, !rec.tags.isEmpty { refs.append((r, rec.tags)) }
+        if let r = rec.fpRow, r >= 0, !rec.tags.isEmpty {
+            var lv: [Int: Float] = [:]
+            for l in rec.labels ?? [] { lv[l.i] = l.c }
+            refs.append((r, rec.tags, lv))
+        }
     }
+}
+
+let taggedCount = refs.count
+let coldStart = taggedCount < config.coldStartMinTagged
+if coldStart { stderrLine("overlap-suggest: cold start (\(taggedCount) tagged) — classifier/OCR only") }
+
+/// Sparse cosine between classifier-label vectors (semantic similarity channel of
+/// the in-process ensemble; research α=.3 ensemble hit F1 .789 vs .743 single).
+func labelSim(_ a: [Int: Float], _ b: [Int: Float]) -> Double {
+    guard !a.isEmpty, !b.isEmpty else { return 0 }
+    var dot: Float = 0
+    let (small, big) = a.count <= b.count ? (a, b) : (b, a)
+    for (i, v) in small { if let w = big[i] { dot += v * w } }
+    let na = a.values.reduce(Float(0)) { $0 + $1 * $1 }.squareRoot()
+    let nb = b.values.reduce(Float(0)) { $0 + $1 * $1 }.squareRoot()
+    return na > 0 && nb > 0 ? Double(dot / (na * nb)) : 0
+}
+
+// Learned classifier→user-tag mapping: P(userTag | label) from images carrying
+// both, accepted at support >= clsMapMinSupport and P >= clsMapMinP.
+var labelImages: [Int: Int] = [:]
+var labelTagPairs: [Int: [String: Int]] = [:]
+for (_, rec) in meta.images where !rec.tags.isEmpty {
+    for l in rec.labels ?? [] {
+        labelImages[l.i, default: 0] += 1
+        for t in Set(rec.tags) { labelTagPairs[l.i, default: [:]][t, default: 0] += 1 }
+    }
+}
+var clsMap: [Int: [(tag: String, p: Double)]] = [:]
+for (i, count) in labelImages where count >= config.clsMapMinSupport {
+    var mapped: [(String, Double)] = []
+    for (t, pair) in labelTagPairs[i] ?? [:] {
+        let p = Double(pair) / Double(count)
+        if p >= config.clsMapMinP { mapped.append((t, p)) }
+    }
+    if !mapped.isEmpty { clsMap[i] = mapped }
+}
+
+// OCR tag matching: lowercase leaf ("of/Fashion" -> "fashion") -> full tag, from
+// the user's known vocabulary plus the corpus.
+var leafToTag: [String: String] = [:]
+for t in (req.knownTags ?? []) + Array(coocSupport.keys) {
+    let leaf = (t.split(separator: "/").last.map(String.init) ?? t).lowercased()
+    if leaf.count >= 3 { leafToTag[leaf] = t }
+}
+func editDistanceAtMost1(_ a: String, _ b: String) -> Bool {
+    if a == b { return true }
+    let (s, l) = a.count <= b.count ? (Array(a), Array(b)) : (Array(b), Array(a))
+    if l.count - s.count > 1 { return false }
+    var i = 0, j = 0, edits = 0
+    while i < s.count && j < l.count {
+        if s[i] == l[j] { i += 1; j += 1; continue }
+        edits += 1
+        if edits > 1 { return false }
+        if s.count == l.count { i += 1; j += 1 } else { j += 1 }
+    }
+    return edits + (l.count - j) + (s.count - i) <= 1
 }
 
 for file in req.files {
@@ -426,31 +669,71 @@ for file in req.files {
     let own = Set(file.tags)
     var channelScores: [String: [Double]] = [:]   // tag -> per-channel weighted scores
 
-    // Channel A — kNN borrowed tags.
-    if let blob = fpBlob, let tRow = rec.fpRow, tRow >= 0, meta.fpDim > 0,
+    // Aesthetics modifier: utility images (screenshots/receipts/docs) are where
+    // scene-similarity misfires — damp kNN + classifier there so OCR dominates.
+    let aesFactor = (rec.aes?.utility == true) ? 0.9 : 1.0
+
+    // Target's sparse label vector (ensemble sim + channel C).
+    var targetLabels: [Int: Float] = [:]
+    for l in rec.labels ?? [] { targetLabels[l.i] = l.c }
+
+    // Channel A — kNN borrowed tags; neighbor similarity is the in-process
+    // ensemble: (1-α)·FeaturePrint + α·classifier-label cosine.
+    if !coldStart, let blob = fpBlob, let tRow = rec.fpRow, tRow >= 0, meta.fpDim > 0,
        (tRow + 1) * meta.fpDim * 4 <= blob.size {
         let base = blob.ptr.assumingMemoryBound(to: Float.self)
         let dim = meta.fpDim
         func rowPtr(_ r: Int) -> UnsafePointer<Float> { UnsafePointer(base).advanced(by: r * dim) }
         let tv = rowPtr(tRow)
-        var scored: [(sim: Float, tags: [String])] = []
+        let alpha = targetLabels.isEmpty ? 0 : config.labelEnsembleAlpha
+        var scored: [(sim: Double, tags: [String])] = []
         scored.reserveCapacity(refs.count)
         for ref in refs where ref.row != tRow && (ref.row + 1) * dim * 4 <= blob.size {
             var d: Float = 0
             vDSP_dotpr(tv, 1, rowPtr(ref.row), 1, &d, vDSP_Length(dim))
-            scored.append((d, ref.tags))
+            let sim = (1 - alpha) * Double(d) + alpha * labelSim(targetLabels, ref.labels)
+            scored.append((sim, ref.tags))
         }
-        let top = scored.sorted { $0.sim > $1.sim }.prefix(K)
-        let total = top.reduce(0.0) { $0 + max(0, Double($1.sim)) }
+        let top = scored.sorted { $0.sim > $1.sim }.prefix(config.k)
+        let total = top.reduce(0.0) { $0 + max(0, $1.sim) }
         if total > 0 {
             var weight: [String: Double] = [:]
             for n in top {
                 for tag in Set(n.tags) where !own.contains(tag) {
-                    weight[tag, default: 0] += max(0, Double(n.sim))
+                    weight[tag, default: 0] += max(0, n.sim)
                 }
             }
             for (tag, w) in weight {
-                channelScores[tag, default: []].append(W_KNN * min(1, w / total))
+                channelScores[tag, default: []].append(config.weights.knn * aesFactor * min(1, w / total))
+            }
+        }
+    }
+
+    // Channel C — classifier labels mapped into the user's vocabulary.
+    if !targetLabels.isEmpty {
+        var clsScore: [String: Double] = [:]
+        for (i, conf) in targetLabels {
+            for (tag, p) in clsMap[i] ?? [] where !own.contains(tag) {
+                clsScore[tag] = max(clsScore[tag] ?? 0, Double(conf) * p)
+            }
+        }
+        for (tag, s) in clsScore {
+            channelScores[tag, default: []].append(config.weights.cls * aesFactor * s)
+        }
+    }
+
+    // Channel D — OCR text naming a tag: the highest-precision evidence we have.
+    if let tokens = rec.ocr, !tokens.isEmpty {
+        for tokenId in tokens where tokenId < meta.tokenVocab.count {
+            let token = meta.tokenVocab[tokenId]
+            if let tag = leafToTag[token], !own.contains(tag) {
+                channelScores[tag, default: []].append(config.weights.ocr * 0.9)
+            } else if token.count >= 5 {
+                for (leaf, tag) in leafToTag
+                where !own.contains(tag) && abs(leaf.count - token.count) <= 1
+                    && editDistanceAtMost1(token, leaf) {
+                    channelScores[tag, default: []].append(config.weights.ocr * 0.75)
+                }
             }
         }
     }
@@ -472,17 +755,68 @@ for file in req.files {
                            pc.baseAddress!, 1, &d, vDSP_Length(dim))
             }
             let conf = max(0, min(1, Double(d)))
-            channelScores[name, default: []].append(W_FACE * conf)
+            channelScores[name, default: []].append(config.weights.face * conf)
         }
     }
 
-    // Noisy-OR fusion, threshold, cap. (Cooc rerank + mutex arrive in phase 2.)
+    // Noisy-OR fusion across channels.
     var fused = channelScores.map { (tag: $0.key,
                                      score: 1 - $0.value.reduce(1.0) { $0 * (1 - min(1, $1)) }) }
-        .filter { $0.score >= MIN_CONFIDENCE }
-        .sorted { $0.score > $1.score }
-    fused = Array(fused.prefix(MAX_TAGS_PER_FILE))
-    for f in fused {
+
+    // Cooc rerank (research: +3pts precision at λ=.2): pull each candidate toward
+    // the tags the corpus says accompany the OTHER candidates on this file.
+    if config.lambda > 0, fused.count > 1 {
+        let base = fused
+        fused = base.map { cand in
+            // Rerank only tags the corpus actually knows (support): pseudo-tags
+            // like "Person N" and rare tags have no co-occurrence statistics, and
+            // λ-blending them against zero would just erode good channel scores.
+            guard hasSupport(cand.tag), !cand.tag.hasPrefix("Person ") else { return cand }
+            var num = 0.0, den = 0.0
+            for other in base where other.tag != cand.tag {
+                num += other.score * pCond(cand.tag, given: other.tag)
+                den += other.score
+            }
+            let coocScore = den > 0 ? num / den : cand.score
+            return (cand.tag, (1 - config.lambda) * cand.score + config.lambda * coocScore)
+        }
+    }
+
+    // Mutex-drop (research: free precision, P .797→.815): walking best-first, drop
+    // a candidate that "never" co-occurs with an already-kept tag. Only applied
+    // between tags with real corpus support; Person-N pseudo-tags are exempt.
+    fused.sort { $0.score > $1.score }
+    var kept: [(tag: String, score: Double)] = []
+    for cand in fused {
+        let isPseudo = cand.tag.hasPrefix("Person ")
+        let conflicted = !isPseudo && hasSupport(cand.tag) && kept.contains { k in
+            !k.tag.hasPrefix("Person ") && hasSupport(k.tag)
+                && pCond(cand.tag, given: k.tag) < config.mutexFloor
+                && pCond(k.tag, given: cand.tag) < config.mutexFloor
+        }
+        if !conflicted { kept.append(cand) }
+    }
+
+    let threshold = config.highPrecisionMode ? 0.60 : config.minConfidence
+    var final = Array(kept.filter { $0.score >= threshold }.prefix(config.maxTagsPerFile))
+
+    // Raw classifier fallback: when the personalized channels have nothing for
+    // this file (or the whole corpus is cold), surface Apple's calibrated labels
+    // as obj/<Label> — the researched cold-start answer (P≥.9 filter at store
+    // time; far above the 0.221 bare-name CLIP baseline). Cap 3.
+    if final.isEmpty, !targetLabels.isEmpty {
+        let raw = targetLabels
+            .sorted { $0.value > $1.value }
+            .prefix(3)
+            .compactMap { (i, c) -> (tag: String, score: Double)? in
+                guard i < meta.labelVocab.count else { return nil }
+                let tag = "obj/\(meta.labelVocab[i].capitalized)"
+                return own.contains(tag) ? nil : (tag, Double(c))
+            }
+        final = raw.filter { $0.score >= config.minConfidence }
+    }
+
+    for f in final {
         out.append(RawSuggestion(path: file.path, tag: f.tag,
                                  confidence: min(1, f.score), source: SOURCE))
     }

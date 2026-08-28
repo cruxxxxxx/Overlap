@@ -141,7 +141,8 @@ in with **zero app changes**.
 | `plugins/folderkind/` | folder name + file kind + neighbor tags — dependency-free template | yes |
 | `plugins/mockcluster/` | deterministic fake clusters — exercises the group-chip UX with no ML | no |
 | `plugins/visionknn/` | Apple Vision FeaturePrint kNN over the tagged library (real similarity) | yes |
-| `plugins/facecluster/` | Apple Vision faceprints → "Person N" group chips (real clustering) | no |
+| `plugins/facecluster/` | Apple Vision faceprints → stable person-identity tags (real clustering) | yes |
+| `plugins/overlap-suggest/` | **unified multi-signal suggester**: FeaturePrint kNN + face identities + classifier labels + OCR + face-quality gating + aesthetics, fused (noisy-OR) with co-occurrence rerank/mutex learned from your tags; migrates the visionknn/facecluster caches; tunables in its cache-dir `config.json` | yes |
 
 Build and install all of them:
 
