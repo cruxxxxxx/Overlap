@@ -73,23 +73,24 @@ struct ContentView: View {
                 .frame(minWidth: 240)
         } detail: {
             ResultsGridView()
-        }
-        // Thin, non-blocking strip while plugin indexes warm up in the background.
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if store.warmingUp {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(store.warmupProgress ?? "Preparing suggestions…")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    Spacer()
+                // Thin warm-up strip on the DETAIL pane only, so it never covers
+                // the sidebar's Tags/Queue/Explore picker.
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if store.warmingUp {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(store.warmupProgress ?? "Preparing suggestions…")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 4)
+                        .background(.bar)
+                        .overlay(Divider(), alignment: .bottom)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                 }
-                .padding(.horizontal, 12).padding(.vertical, 4)
-                .background(.bar)
-                .overlay(Divider(), alignment: .bottom)
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
+                .animation(.easeInOut(duration: 0.2), value: store.warmingUp)
         }
-        .animation(.easeInOut(duration: 0.2), value: store.warmingUp)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
