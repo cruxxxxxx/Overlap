@@ -46,10 +46,63 @@ final class TagStore: ObservableObject {
     @Published var knownTags: Set<String> = []
 
     /// Plugin-generated tag suggestions for the current selection (via the
-    /// out-of-process suggestion plugins). Populated on demand by `suggestTags`.
+    /// out-of-process suggestion plugins). Auto-populated on selection change
+    /// (debounced) by `autoSuggestSelection`.
     @Published private(set) var suggestions: [TagSuggestion] = []
     @Published private(set) var suggesting = false
+    /// Latest progress line a running plugin emitted on stderr (e.g. "Building
+    /// suggestion index… 300/4000"). Shown in the suggestion bar; nil when idle
+    /// or when no plugin reports progress.
+    @Published private(set) var suggestProgress: String?
     private var suggestToken = UUID()
+    private var autoSuggestTask: Task<Void, Never>?
+
+    /// Queue-wide suggestions for the "group by suggestions" browse mode.
+    /// Deliberately separate from `suggestions`: the debounced selection
+    /// auto-suggest and this whole-queue run have independent lifetimes.
+    @Published private(set) var queueSuggestions: [TagSuggestion] = []
+    @Published private(set) var queueSuggesting = false
+    @Published private(set) var queueSuggestProgress: String?
+    private var queueSuggestToken = UUID()
+    /// The sectioned view of `results` derived from `queueSuggestions`.
+    /// Precomputed (not a computed property) — rebuilding is O(files × sections).
+    @Published private(set) var queueSections: [SuggestionSection] = []
+    /// "Group by suggestions" toggle for queue mode. Persisted.
+    @Published private(set) var queueGrouping =
+        UserDefaults.standard.bool(forKey: "queueGrouping")
+    /// The single plugin whose suggestions drive the grouped view (one source at
+    /// a time keeps sections coherent — faces OR visual neighbors, not a mix).
+    /// Persisted; nil with grouping on falls back to all enabled plugins.
+    @Published private(set) var groupPluginID: String? =
+        UserDefaults.standard.string(forKey: "groupPluginID")
+
+    /// User-tuned plugin settings: pluginID -> key -> value, persisted as JSON.
+    /// Merged over each plugin's declared defaults and injected into requests.
+    @Published private(set) var pluginSettings: [String: [String: SettingValue]] = {
+        guard let data = UserDefaults.standard.data(forKey: "pluginSettings"),
+              let map = try? JSONDecoder().decode([String: [String: SettingValue]].self, from: data)
+        else { return [:] }
+        return map
+    }()
+
+    /// Background plugin index warm-up: after the catalog loads, the similarity
+    /// plugins are fed the full library with NO target files, so they build/refresh
+    /// their persistent indexes off the user's critical path. A thin progress
+    /// strip at the top of the window is the only visible surface.
+    @Published private(set) var warmingUp = false
+    @Published private(set) var warmupProgress: String?
+    private var lastWarmedSig = ""
+    /// Suggestion sources the user has switched off (plugin ids). Persisted.
+    @Published var disabledPluginIDs: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "disabledPluginIDs") ?? []) {
+        didSet { UserDefaults.standard.set(Array(disabledPluginIDs), forKey: "disabledPluginIDs") }
+    }
+    /// Master switch for auto-suggest. Off = no plugin runs, suggestion row
+    /// stays collapsed. Persisted; toggled by tapping ✨ in the tag bar.
+    @Published var autoSuggestEnabled: Bool =
+        UserDefaults.standard.object(forKey: "autoSuggestEnabled") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(autoSuggestEnabled, forKey: "autoSuggestEnabled") }
+    }
     /// Custom order for top-level tags (names). Unlisted ones fall back to A→Z.
     @Published var tagOrder: [String] = []
 
@@ -219,6 +272,9 @@ final class TagStore: ObservableObject {
                 self.refreshVisible()
                 self.catalogQuery.enableUpdates()
                 self.saveCache()
+                // Catalog is loaded — build/refresh the plugins' persistent indexes
+                // in the background so the first Suggest isn't the slow one.
+                self.warmUpPlugins()
             }
         }
     }
@@ -832,7 +888,11 @@ final class TagStore: ObservableObject {
     /// clause passes and no exclude matches. Per diagram: painted regions
     /// gate the membership mask; otherwise the diagram's mode does.
     func refreshResults() {
-        if mode == .queue { results = sortItems(filteredQueue()); return }
+        if mode == .queue {
+            results = sortItems(filteredQueue())
+            rebuildQueueSections()   // sections track the visible queue for free
+            return
+        }
         let activeGroups = groups.filter { !$0.sets.isEmpty }
         let exc = activeExcludes
         let hasTypeFilter = !kindFilter.isEmpty || !extFilter.isEmpty
@@ -1035,12 +1095,113 @@ final class TagStore: ObservableObject {
     /// The tagged corpus handed to plugins that ask for it (`wantsLibrary`):
     /// every visible file that already carries at least one tag. Respects the
     /// hidden-tag pool, so locked hidden files never leak into a plugin.
-    var taggedLibrary: [FileItem] { visibleItems.filter { !$0.tags.isEmpty } }
+    /// The corpus similarity plugins (`wantsLibrary`) match against: the full
+    /// tagged catalog (`allItems`) unioned with any tagged items in the current
+    /// view/queue, deduped by path. Using `allItems` — not just what's visible —
+    /// is what lets a fresh untagged queue match against the whole library; adding
+    /// the visible tagged items lets queue items tagged this session inform the
+    /// rest before Spotlight reindexes them into the catalog.
+    var taggedLibrary: [FileItem] {
+        var byPath: [String: FileItem] = [:]
+        for it in allItems where !it.tags.isEmpty { byPath[it.url.path] = it }
+        for it in visibleItems where !it.tags.isEmpty { byPath[it.url.path] = it }
+        return Array(byPath.values)
+    }
+
+    /// Last corpus signature sent to the similarity plugins. Resets to "" each
+    /// launch, so the first Suggest of a session always re-syncs the full library.
+    private var lastSentCorpusSig = ""
+
+    /// Cheap content signature of the tagged catalog: count + a fold of each item's
+    /// path and tags. Changes whenever a file is tagged/untagged/renamed, so the
+    /// suggestion path knows when to re-send the library vs let the plugin reuse its
+    /// persisted copy. O(catalog) but no allocation/serialization — ~1ms for
+    /// thousands. (path.hashValue is per-launch, which is why the first run re-syncs.)
+    private func corpusSignature() -> String {
+        var h: UInt64 = 14695981039346656037
+        h = (h ^ UInt64(allItems.count)) &* 1099511628211
+        for it in allItems {
+            h = (h ^ UInt64(bitPattern: Int64(it.url.path.hashValue))) &* 1099511628211
+            for t in it.tags { h = (h ^ UInt64(bitPattern: Int64(t.hashValue))) &* 1099511628211 }
+        }
+        return String(h)
+    }
 
     func clearSuggestions() {
+        autoSuggestTask?.cancel()
         suggestToken = UUID()
         suggestions = []
         suggesting = false
+    }
+
+    /// Debounced suggestion run for whatever is currently selected. Called on
+    /// every selection change — the delay coalesces rapid arrow-key / drag
+    /// selection into one plugin invocation, and the token guard in
+    /// `suggestTags` supersedes anything still in flight.
+    func autoSuggestSelection() {
+        autoSuggestTask?.cancel()
+        // Never run a selection suggest while a queue-wide run or index warm-up is
+        // in flight: concurrent plugin processes would race the persistent indexes.
+        guard !queueSuggesting, !warmingUp else { return }
+        guard autoSuggestEnabled else { clearSuggestions(); return }
+        let items = results.filter { selection.contains($0.id) }
+        guard !items.isEmpty else { clearSuggestions(); return }
+        autoSuggestTask = Task { [weak self] in
+            // Short debounce: enough to coalesce rapid arrow-key/drag selection into
+            // one run, but low enough that a single deliberate click feels immediate
+            // (the warm plugin itself is ~10ms). The token guard supersedes stragglers.
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            guard !Task.isCancelled else { return }
+            self?.suggestTags(for: items)
+        }
+    }
+
+    /// Drop one suggestion chip after the user applies it, leaving the rest so
+    /// cluster-style suggestions can be worked through one group at a time.
+    func consumeSuggestion(_ tag: String) {
+        suggestions.removeAll { $0.tag == tag }
+    }
+
+    /// Shared plugin-run core for both the selection chips and the queue-wide
+    /// grouped view: build the request, apply the corpus-signature library gating,
+    /// run the engine off-main, deliver merged suggestions back on main.
+    ///
+    /// Note `lastSentCorpusSig` is shared by both callers on purpose: plugins
+    /// persist their corpus index, so whichever path syncs the library first
+    /// covers the other — the second caller correctly sends an empty library.
+    private func runSuggestionEngine(items: [FileItem],
+                                     onlyPlugin: String? = nil,
+                                     onProgress: @escaping @Sendable (String) -> Void,
+                                     completion: @escaping @MainActor ([TagSuggestion]) -> Void) {
+        let files = items.map { RequestFile(path: $0.url.path, kind: $0.kind.rawValue,
+                                            ext: $0.ext, tags: $0.tags, size: $0.size,
+                                            modDate: $0.modDate, createdDate: $0.createdDate) }
+        // Similarity plugins persist their own corpus index, so only re-send the
+        // (potentially large) tagged library when it actually changed since the last
+        // run — otherwise send nothing and let the plugin use its persisted copy.
+        // This keeps a warm click from serializing + piping the whole catalog.
+        let sig = corpusSignature()
+        let library = sig != lastSentCorpusSig
+            ? taggedLibrary.map { LibraryItem(path: $0.url.path, kind: $0.kind.rawValue,
+                                              tags: $0.tags, modDate: $0.modDate) }
+            : []
+        lastSentCorpusSig = sig
+        let known = Array(knownTags)
+        let kinds = Set(items.map(\.kind))
+        let settings = pluginSettings
+        var disabled = disabledPluginIDs
+        if let onlyPlugin {   // restrict this run to a single source
+            disabled.formUnion(PluginRegistry.discover().map(\.id).filter { $0 != onlyPlugin })
+        }
+
+        Task.detached(priority: .userInitiated) {
+            let merged = await SuggestionEngine.run(files: files, library: library,
+                                                    knownTags: known, kinds: kinds,
+                                                    disabledIDs: disabled,
+                                                    pluginSettings: settings,
+                                                    onProgress: onProgress)
+            await MainActor.run { completion(merged) }
+        }
     }
 
     /// Run the suggestion plugins on `items` and publish the merged results,
@@ -1052,26 +1213,209 @@ final class TagStore: ObservableObject {
         suggestToken = token
         suggestions = []
         suggesting = true
+        suggestProgress = nil
 
-        let files = items.map { RequestFile(path: $0.url.path, kind: $0.kind.rawValue,
-                                            ext: $0.ext, tags: $0.tags, size: $0.size,
-                                            modDate: $0.modDate, createdDate: $0.createdDate) }
-        let library = taggedLibrary.map { LibraryItem(path: $0.url.path, kind: $0.kind.rawValue,
-                                                      tags: $0.tags, modDate: $0.modDate) }
         let applied = items.reduce(into: Set<String>()) { $0.formUnion($1.tagSet) }
-        let known = Array(knownTags)
-        let kinds = Set(items.map(\.kind))
-
-        Task.detached(priority: .userInitiated) {
-            let merged = await SuggestionEngine.run(files: files, library: library,
-                                                    knownTags: known, kinds: kinds)
-            let filtered = merged.filter { !applied.contains($0.tag) }
-            await MainActor.run { [weak self] in
+        runSuggestionEngine(items: items, onProgress: { [weak self] line in
+            Task { @MainActor in
                 guard let self, self.suggestToken == token else { return }
-                self.suggestions = filtered
-                self.suggesting = false
+                self.suggestProgress = line
+            }
+        }, completion: { [weak self] merged in
+            guard let self, self.suggestToken == token else { return }
+            self.suggestions = merged.filter { !applied.contains($0.tag) }
+            self.suggesting = false
+            self.suggestProgress = nil
+        })
+    }
+
+    // MARK: Queue-wide suggestion grouping
+
+    /// Run the plugins over the ENTIRE queue and publish `queueSuggestions` +
+    /// the derived `queueSections`. Powers the "group by suggestions" view.
+    func suggestQueue() {
+        guard !warmingUp else { return }   // warm-up completion re-triggers this
+        let items = queueItems.filter { $0.kind != .folder }
+        guard !items.isEmpty else {
+            queueSuggestions = []; queueSections = []; return
+        }
+        let token = UUID()
+        queueSuggestToken = token
+        queueSuggesting = true
+        queueSuggestProgress = nil
+
+        runSuggestionEngine(items: items, onlyPlugin: groupPluginID, onProgress: { [weak self] line in
+            Task { @MainActor in
+                guard let self, self.queueSuggestToken == token else { return }
+                self.queueSuggestProgress = line
+            }
+        }, completion: { [weak self] merged in
+            guard let self, self.queueSuggestToken == token else { return }
+            self.queueSuggestions = merged
+            self.queueSuggesting = false
+            self.queueSuggestProgress = nil
+            self.rebuildQueueSections()
+        })
+    }
+
+    /// Section order from the previous rebuild, so applying/tagging doesn't
+    /// reshuffle groups under the user's scroll position.
+    private var queueSectionOrder: [String: Int] = [:]
+
+    /// Derive the sectioned view from `queueSuggestions` ∩ visible `results`.
+    /// Each file appears in EXACTLY ONE section — its best-ranked suggestion —
+    /// so selection never highlights ghosts in other groups and applying a tag
+    /// can't shift unrelated sections. Section order is sticky across rebuilds
+    /// (new sections rank by faces-first/size/confidence and append after known
+    /// ones); trailing leftover section holds files nothing claimed.
+    func rebuildQueueSections() {
+        guard queueGrouping, mode == .queue, !queueSuggestions.isEmpty else {
+            queueSections = []
+            queueSectionOrder = [:]
+            return
+        }
+        // Candidate members per suggestion (visible + not already carrying it).
+        var candidates: [(s: TagSuggestion, members: [FileItem])] = []
+        for s in queueSuggestions {
+            let members = results.filter { s.paths.contains($0.id) && !$0.tagSet.contains(s.tag) }
+            if !members.isEmpty { candidates.append((s, members)) }
+        }
+        // Rank: previously-seen sections keep their order; new ones sort by
+        // faces-first, then size, then confidence, and follow the known ones.
+        candidates.sort { a, b in
+            let (oa, ob) = (queueSectionOrder[a.s.tag], queueSectionOrder[b.s.tag])
+            switch (oa, ob) {
+            case let (x?, y?): return x < y
+            case (.some, .none): return true
+            case (.none, .some): return false
+            case (.none, .none):
+                if a.s.isGroup != b.s.isGroup { return a.s.isGroup }
+                if a.members.count != b.members.count { return a.members.count > b.members.count }
+                return a.s.confidence > b.s.confidence
             }
         }
+        // Exclusive assignment: first (best-ranked) section to claim a file wins.
+        var claimed = Set<String>()
+        var sections: [SuggestionSection] = []
+        for c in candidates {
+            let mine = c.members.filter { !claimed.contains($0.id) }
+            guard !mine.isEmpty else { continue }
+            claimed.formUnion(mine.map(\.id))
+            sections.append(SuggestionSection(suggestion: c.s, items: mine))
+        }
+        let leftover = results.filter { !claimed.contains($0.id) }
+        if !leftover.isEmpty {
+            sections.append(SuggestionSection(suggestion: nil, items: leftover))
+        }
+        queueSections = sections
+        queueSectionOrder = Dictionary(uniqueKeysWithValues:
+            sections.compactMap { $0.suggestion.map(\.tag) }.enumerated().map { ($1, $0) })
+    }
+
+    /// Drop one queue-wide suggestion (after Apply All) and rebuild sections.
+    func consumeQueueSuggestion(_ tag: String) {
+        queueSuggestions.removeAll { $0.tag == tag }
+        rebuildQueueSections()
+    }
+
+    /// Toggle the grouped view; entering it with no suggestions kicks off a run
+    /// (unless one is already in flight — its completion will build the sections).
+    func setQueueGrouping(_ on: Bool) {
+        queueGrouping = on
+        UserDefaults.standard.set(on, forKey: "queueGrouping")
+        if on && queueSuggestions.isEmpty {
+            if !queueSuggesting { suggestQueue() }
+        } else {
+            rebuildQueueSections()
+        }
+    }
+
+    /// Declared defaults overlaid with the user's stored tweaks; nil when the
+    /// plugin declares no settings (host then omits `settings` from the request).
+    nonisolated static func effectiveSettings(for plugin: DiscoveredPlugin,
+                                              stored: [String: [String: SettingValue]]) -> [String: SettingValue]? {
+        guard let schema = plugin.manifest.settings, !schema.isEmpty else { return nil }
+        var merged: [String: SettingValue] = [:]
+        for s in schema { merged[s.key] = s.defaultValue }
+        for (k, v) in stored[plugin.id] ?? [:] where merged[k] != nil { merged[k] = v }
+        return merged
+    }
+
+    /// Set one plugin setting and re-suggest everything live — tuning has
+    /// immediate, visible effect.
+    func setPluginSetting(_ pluginID: String, key: String, value: SettingValue) {
+        pluginSettings[pluginID, default: [:]][key] = value
+        persistPluginSettings()
+        resuggestAfterSettingsChange()
+    }
+
+    func resetPluginSettings(_ pluginID: String) {
+        pluginSettings.removeValue(forKey: pluginID)
+        persistPluginSettings()
+        resuggestAfterSettingsChange()
+    }
+
+    private func persistPluginSettings() {
+        if let d = try? JSONEncoder().encode(pluginSettings) {
+            UserDefaults.standard.set(d, forKey: "pluginSettings")
+        }
+    }
+
+    private func resuggestAfterSettingsChange() {
+        clearSuggestions()
+        queueSuggestions = []
+        rebuildQueueSections()
+        autoSuggestSelection()
+        if mode == .queue && queueGrouping { suggestQueue() }
+    }
+
+    /// Kick a background index warm-up (no target files — plugins just sync their
+    /// persistent indexes over the library). Skipped when the corpus hasn't
+    /// changed since the last warm-up, unless forced from the Plugins menu.
+    func warmUpPlugins(force: Bool = false) {
+        guard !warmingUp, !queueSuggesting else { return }
+        let sig = corpusSignature()
+        guard force || sig != lastWarmedSig else { return }
+        warmingUp = true
+        warmupProgress = nil
+        let library = taggedLibrary.map { LibraryItem(path: $0.url.path, kind: $0.kind.rawValue,
+                                                      tags: $0.tags, modDate: $0.modDate) }
+        lastSentCorpusSig = sig   // this run delivers the corpus; later runs send []
+        let known = Array(knownTags)
+        let disabled = disabledPluginIDs
+        let settings = pluginSettings
+        Task.detached(priority: .utility) {
+            _ = await SuggestionEngine.run(files: [], library: library, knownTags: known,
+                                           kinds: [.image], disabledIDs: disabled,
+                                           pluginSettings: settings,
+                                           onProgress: { [weak self] line in
+                Task { @MainActor in self?.warmupProgress = line }
+            })
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.warmingUp = false
+                self.warmupProgress = nil
+                self.lastWarmedSig = sig
+                // Anything the warm-up blocked can go now, against a warm index.
+                if self.mode == .queue && self.queueGrouping && self.queueSuggestions.isEmpty {
+                    self.suggestQueue()
+                }
+                self.autoSuggestSelection()
+            }
+        }
+    }
+
+    /// Pick the single plugin that drives grouping (nil = grouping off). Changing
+    /// source invalidates the previous run's suggestions and re-runs.
+    func setGroupPlugin(_ id: String?) {
+        groupPluginID = id
+        UserDefaults.standard.set(id, forKey: "groupPluginID")
+        guard let _ = id else { setQueueGrouping(false); return }
+        queueSuggestions = []
+        queueSections = []
+        queueGrouping = true
+        UserDefaults.standard.set(true, forKey: "queueGrouping")
+        suggestQueue()
     }
 
     func removeTag(_ tag: String, from urls: [URL]) {
@@ -1317,6 +1661,11 @@ final class TagStore: ObservableObject {
                 self.queueItems = result
                 self.isScanning = false
                 if self.mode == .queue { self.selection = []; self.results = self.sortItems(self.filteredQueue()) }
+                // The queue's contents changed — stale queue-wide suggestions are
+                // meaningless. Clear, and recompute if the grouped view is active.
+                self.queueSuggestions = []
+                self.queueSections = []
+                if self.mode == .queue && self.queueGrouping { self.suggestQueue() }
             }
         }
     }

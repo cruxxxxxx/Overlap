@@ -22,8 +22,50 @@ struct OverlapApp: App {
                     NotificationCenter.default.post(name: .overlapStartTutorial, object: nil)
                 }
             }
+            CommandMenu("Plugins") {
+                let plugins = PluginRegistry.discover()
+                    .sorted { $0.manifest.name < $1.manifest.name }
+                if plugins.isEmpty {
+                    Text("No plugins installed")
+                } else {
+                    ForEach(plugins) { p in
+                        Toggle(p.manifest.name, isOn: Binding(
+                            get: { !store.disabledPluginIDs.contains(p.id) },
+                            set: { on in
+                                if on { store.disabledPluginIDs.remove(p.id) }
+                                else { store.disabledPluginIDs.insert(p.id) }
+                            }))
+                    }
+                }
+                Divider()
+                Button("Plugin Settings…") {
+                    NotificationCenter.default.post(name: .overlapShowPluginSettings, object: nil)
+                }
+                Button(store.warmingUp ? "Warming Up Index…" : "Warm Up Suggestion Index") {
+                    store.warmUpPlugins(force: true)
+                }
+                .disabled(store.warmingUp)
+                Divider()
+                Button("Open Plugins Folder") {
+                    if let dir = PluginRegistry.userPluginsDir() {
+                        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(dir)
+                    }
+                }
+                Button("Open Plugin Cache & Config") {
+                    let dir = FileManager.default
+                        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("Overlap/PluginCache", isDirectory: true)
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(dir)
+                }
+            }
         }
     }
+}
+
+extension Notification.Name {
+    static let overlapShowPluginSettings = Notification.Name("overlapShowPluginSettings")
 }
 
 struct ContentView: View {
@@ -31,6 +73,7 @@ struct ContentView: View {
     @State private var showStats = false
     @State private var showPrivacy = false
     @State private var showSlideshow = false
+    @State private var showPluginSettings = false
 
     var body: some View {
         NavigationSplitView {
@@ -106,6 +149,12 @@ struct ContentView: View {
             }
         }
         .navigationTitle("Overlap")
+        .onReceive(NotificationCenter.default.publisher(for: .overlapShowPluginSettings)) { _ in
+            showPluginSettings = true
+        }
+        .sheet(isPresented: $showPluginSettings) {
+            PluginSettingsView().environmentObject(store)
+        }
         .sheet(isPresented: $showStats) { StatsView().environmentObject(store) }
         .sheet(isPresented: $showPrivacy) { PrivacyView().environmentObject(store) }
         .sheet(isPresented: $showSlideshow) {

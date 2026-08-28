@@ -1,0 +1,12 @@
+{
+  "name": "Mock Cluster",
+  "id": "com.overlap.mockcluster",
+  "version": "0.1.0",
+  "protocolVersion": 1,
+  "exec": "mockcluster",
+  "handles": ["*"],
+  "batch": true,
+  "wantsKnownTags": false,
+  "wantsLibrary": false,
+  "timeoutMs": 3000
+}

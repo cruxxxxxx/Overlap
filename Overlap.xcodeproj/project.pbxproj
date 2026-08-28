@@ -33,6 +33,7 @@
 		C07952477346E2443791F571 /* SuggestionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A93D6386F7A5E3316F03223B /* SuggestionService.swift */; };
 		C14AFAA093CF29C2E64BFBC7 /* TutorialOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 245887A7AE045720FF2AD057 /* TutorialOverlay.swift */; };
 		C2AB16B6958CA1E93792DE6F /* ThumbnailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59C4E3A3894AA2C2D2826E63 /* ThumbnailCache.swift */; };
+		D1F8ED4FDD0E428263AC3E82 /* PluginSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEE129AF03AA2CE809A4015F /* PluginSettingsView.swift */; };
 		D566F2F4C8BEE89BC0B31A9A /* TagIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56EE77C009857BE25A9C6DFE /* TagIO.swift */; };
 		E272D1BE93E411DB59DDFA5D /* PluginContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE2749A6FEAF7C13BF5F4E41 /* PluginContract.swift */; };
 		E79E337DC39FF228D4472737 /* ExploreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19747B4E7F1808FFF2AE64A5 /* ExploreView.swift */; };
@@ -71,6 +72,7 @@
 		A93D6386F7A5E3316F03223B /* SuggestionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SuggestionService.swift; sourceTree = "<group>"; };
 		B22DED0C110EF7F8CF7C2E6B /* CirclePack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CirclePack.swift; sourceTree = "<group>"; };
 		B5B282B55068C433819CF615 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		BEE129AF03AA2CE809A4015F /* PluginSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginSettingsView.swift; sourceTree = "<group>"; };
 		CDFD72BDB677E4DD2A8438F1 /* QuickLookController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookController.swift; sourceTree = "<group>"; };
 		CE720A61E4769A5E60B62A72 /* TagMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagMapView.swift; sourceTree = "<group>"; };
 		D1F45A6D0FEF48E8E8466FD6 /* Overlap.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Overlap.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -131,6 +133,7 @@
 				E5E2D644A019FBE86AB4F2C6 /* OverlapApp.swift */,
 				EE2749A6FEAF7C13BF5F4E41 /* PluginContract.swift */,
 				80CDDCF7E04C0B8957EB8CEF /* PluginRegistry.swift */,
+				BEE129AF03AA2CE809A4015F /* PluginSettingsView.swift */,
 				9DC1354E4EC383D845FE2D7A /* PreviewPane.swift */,
 				385582827B8FB3942C356EE5 /* PrivacyView.swift */,
 				89A47F300D6D684652E8A861 /* QueryBar.swift */,
@@ -250,6 +253,7 @@
 				41569B206A51BC0ABE25BE60 /* OverlapApp.swift in Sources */,
 				E272D1BE93E411DB59DDFA5D /* PluginContract.swift in Sources */,
 				58A3B89E74499A8ECF53CDD9 /* PluginRegistry.swift in Sources */,
+				D1F8ED4FDD0E428263AC3E82 /* PluginSettingsView.swift in Sources */,
 				07D0BDA5185A7D9769FF4E81 /* PreviewPane.swift in Sources */,
 				7121CEC02561332893D30898 /* PrivacyView.swift in Sources */,
 				44AF7A81E7208F108B82F633 /* QueryBar.swift in Sources */,

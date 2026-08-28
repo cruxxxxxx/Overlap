@@ -23,7 +23,11 @@ is how to write your own.
 4. You write a JSON **response** to **stdout** and exit `0`.
 
 5. Overlap merges every plugin's suggestions, ranks them by confidence, and shows
-   them as tap-to-apply chips.
+   them as tap-to-apply chips. A chip applies its tag to **only the files it
+   covers** (the paths you suggested it for), so a clustering plugin can return
+   several disjoint groups over one selection — each group becomes its own chip
+   with a member-count badge. ⌥-click a chip to select just its members in the
+   grid before committing.
 
 A crash, non-zero exit, timeout, or malformed output is ignored — one bad plugin
 never blocks the others or the app.
@@ -105,6 +109,37 @@ unsandboxed, so plugins have normal filesystem access).
 The authoritative types live in
 [`Sources/PluginContract.swift`](../Sources/PluginContract.swift).
 
+### Settings (optional)
+
+Declare tunables in the manifest and Overlap renders them in **Plugins ▸ Plugin
+Settings…** (toggles, sliders, pickers) and injects the merged values into every
+request as `settings: {key: value}`:
+
+```json
+"settings": [
+  { "key": "minConfidence", "type": "number", "label": "Minimum confidence",
+    "section": "Tuning", "min": 0, "max": 0.9, "step": 0.05, "default": 0.3,
+    "help": "Suggestions below this score are dropped" },
+  { "key": "channelFaces", "type": "bool", "label": "Faces", "section": "Channels",
+    "default": true }
+]
+```
+
+`type` is `bool` (toggle), `number` (slider with `min`/`max`/`step`), or `choice`
+(picker over `choices: [{value,label}]`). Treat request `settings` as overrides
+over your own defaults; ignore unknown keys. A request without `settings` (older
+host) must keep working. `overlap-suggest/` is the reference implementation.
+
+### Progress (stderr, optional)
+
+A plugin that does heavy first-run work (embedding a whole library, building an
+index) can write **human-readable progress lines to stderr** while it works.
+Overlap streams them and shows the latest line in the suggestion bar (e.g.
+`Building suggestion index… 300/4000`). One line per update, newline-terminated;
+stdout stays reserved for the single JSON response. Emitting nothing is fine —
+plugins with no heavy phase just return their JSON. `visionknn` does this only on a
+cold/changed library, staying silent on warm cache hits.
+
 ---
 
 ## Similarity plugins (`wantsLibrary`)
@@ -114,19 +149,28 @@ tags. The intended pattern: **embed** those files, **cluster** or nearest-
 neighbor the target against them, and suggest the tags its closest matches carry.
 Cache your embeddings by `path` + `modDate` so you only re-embed what changed.
 
-This is how a future Apple Vision + clustering plugin drops in with **zero app
-changes**.
+`plugins/visionknn/` is exactly this, for real: Apple Vision FeaturePrint
+embeddings + cosine kNN over the library, with an on-disk embedding cache. It drops
+in with **zero app changes**.
 
 ---
 
-## Reference plugin
+## Bundled plugins
 
-`plugins/folderkind/` is a tiny, dependency-free Swift plugin: it suggests the
-parent folder name, the file kind, and the most common tags among library files
-in the same folder/kind. Build and install it:
+| plugin | what it does | library? |
+|---|---|---|
+| `plugins/overlap-suggest/` | **the shipping suggester** — FeaturePrint kNN + face identities + classifier labels + OCR + face-quality gating + aesthetics, fused (noisy-OR) with co-occurrence rerank/mutex learned from your tags; declares tunables via manifest `settings` (rendered in Plugins ▸ Plugin Settings…) | yes |
+| `plugins/folderkind/` | folder name + file kind + neighbor tags — dependency-free reference/template (not installed by default) | yes |
+| `plugins/mockcluster/` | deterministic fake clusters — exercises the group-chip UX with no ML (not installed by default) | no |
+
+(The earlier `visionknn` and `facecluster` plugins were merged into `overlap-suggest`,
+which migrates their caches automatically; their dirs are removed.)
+
+Build and install all of them:
 
 ```sh
 bash plugins/install.sh
 ```
 
-Read its `main.swift` as a starting template.
+Read `folderkind/main.swift` as a starting template; `visionknn` and `facecluster`
+show the real embed/cluster patterns with Apple Vision.

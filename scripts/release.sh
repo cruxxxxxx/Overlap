@@ -36,6 +36,22 @@ xcodebuild -project Overlap.xcodeproj -scheme Overlap -configuration Release \
 cp -R "$OUT/dd/Build/Products/Release/Overlap.app" "$APP"
 rm -rf "$OUT/dd"
 
+echo "-- bundle built-in plugins --"
+# overlap-suggest ships inside the app (Contents/PlugIns — PluginRegistry scans
+# builtInPlugInsURL). The user Plugins dir still overrides by id, so a newer
+# user-installed copy wins over the bundled one.
+PLUGINS_DST="$APP/Contents/PlugIns"
+mkdir -p "$PLUGINS_DST"
+for name in overlap-suggest; do
+    src="plugins/$name"
+    exec_name=$(/usr/bin/python3 -c "import json;print(json.load(open('$src/manifest.json'))['exec'])")
+    echo "   building $name"
+    ( cd "$src" && swiftc -O main.swift -o "$exec_name" )
+    mkdir -p "$PLUGINS_DST/$name"
+    cp "$src/manifest.json" "$src/$exec_name" "$PLUGINS_DST/$name/"
+    [ -f "$src/README.md" ] && cp "$src/README.md" "$PLUGINS_DST/$name/"
+done
+
 echo "-- sign (hardened runtime) --"
 codesign --force --deep --options runtime --timestamp \
   --entitlements Resources/Overlap.entitlements \
