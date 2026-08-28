@@ -100,28 +100,80 @@ func signature(path: String, modDate: Date?) -> String {
     return "s:\(Int(mtime))"
 }
 
-// MARK: - Persistent state (meta.json)
+// MARK: - Persistent state (meta.json + mmap'd faces.bin)
+//
+// Face vectors live in faces.bin — packed float32, one row per face, appended in
+// row order and memory-mapped at query time (no JSON float parsing). meta.json
+// keeps only small things: per-image {sig, [(row, cluster)], tags} plus cluster
+// centroids-in-progress. Cluster sums stay in meta (a few hundred × dim — small).
 
-struct FaceCluster: Codable { var vec: [Float]; var cluster: Int }
-struct ImageEntry: Codable { var sig: String; var faces: [FaceCluster]; var tags: [String] }
+struct FaceRef: Codable { var row: Int; var cluster: Int }
+struct ImageEntry: Codable { var sig: String; var faces: [FaceRef]; var tags: [String] }
 struct ClusterState: Codable { var sum: [Float]; var count: Int }
 struct Meta: Codable {
     var dim: Int = 0
+    var rows: Int = 0                       // rows written to faces.bin
     var images: [String: ImageEntry] = [:]
     var clusters: [Int: ClusterState] = [:]
     var nextCluster: Int = 1
 }
 
-let metaURL: URL = {
-    let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Overlap/PluginCache/facecluster", isDirectory: true)
+let cacheDir: URL = {
+    // OVERLAP_PLUGIN_CACHE overrides the cache root (tests use a throwaway dir —
+    // NSApplicationSupportDirectory ignores $HOME, so this is the only safe way
+    // to isolate a run from the real index).
+    let base: URL
+    if let override = ProcessInfo.processInfo.environment["OVERLAP_PLUGIN_CACHE"] {
+        base = URL(fileURLWithPath: override, isDirectory: true)
+            .appendingPathComponent("facecluster", isDirectory: true)
+    } else {
+        base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Overlap/PluginCache/facecluster", isDirectory: true)
+    }
     try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-    return base.appendingPathComponent("meta.json")
+    return base
 }()
-var meta: Meta = {
-    guard let d = try? Data(contentsOf: metaURL),
-          let m = try? JSONDecoder().decode(Meta.self, from: d) else { return Meta() }
+let metaURL = cacheDir.appendingPathComponent("meta.json")
+let binURL = cacheDir.appendingPathComponent("faces.bin")
+
+// One-time migration from the previous format (vectors as JSON floats in meta):
+// stream the old vecs into faces.bin and keep everything else, so an existing
+// index doesn't need a full re-embed of the library.
+struct OldFace: Codable { var vec: [Float]; var cluster: Int }
+struct OldEntry: Codable { var sig: String; var faces: [OldFace]; var tags: [String] }
+struct OldMeta: Codable {
+    var dim: Int; var images: [String: OldEntry]
+    var clusters: [Int: ClusterState]; var nextCluster: Int
+}
+
+func migrate(_ old: OldMeta) -> Meta {
+    var m = Meta(dim: old.dim, rows: 0, images: [:],
+                 clusters: old.clusters, nextCluster: old.nextCluster)
+    FileManager.default.createFile(atPath: binURL.path, contents: nil)
+    guard let fh = try? FileHandle(forWritingTo: binURL) else { return Meta() }
+    defer { try? fh.close() }
+    for (path, e) in old.images {
+        var refs: [FaceRef] = []
+        for f in e.faces where f.vec.count == old.dim {
+            fh.write(f.vec.withUnsafeBytes { Data($0) })
+            refs.append(FaceRef(row: m.rows, cluster: f.cluster))
+            m.rows += 1
+        }
+        m.images[path] = ImageEntry(sig: e.sig, faces: refs, tags: e.tags)
+    }
     return m
+}
+
+var meta: Meta = {
+    guard let d = try? Data(contentsOf: metaURL) else { return Meta() }
+    if let m = try? JSONDecoder().decode(Meta.self, from: d) { return m }
+    if let old = try? JSONDecoder().decode(OldMeta.self, from: d) {
+        let m = migrate(old)
+        if let enc = try? JSONEncoder().encode(m) { try? enc.write(to: metaURL) }
+        FileHandle.standardError.write(Data("facecluster: migrated index to faces.bin\n".utf8))
+        return m
+    }
+    return Meta()
 }()
 func saveMeta() { if let d = try? JSONEncoder().encode(meta) { try? d.write(to: metaURL) } }
 
@@ -153,6 +205,12 @@ func assign(_ vec: [Float]) -> Int {
 func syncIndex(items: [(path: String, modDate: Date?, tags: [String])], progress: (Int, Int) -> Void) {
     let todo = items.filter { meta.images[$0.path]?.sig != signature(path: $0.path, modDate: $0.modDate) }
     var done = 0
+    if !FileManager.default.fileExists(atPath: binURL.path) {
+        FileManager.default.createFile(atPath: binURL.path, contents: nil)
+    }
+    guard let fh = try? FileHandle(forUpdating: binURL) else { return }
+    defer { try? fh.close() }
+    _ = try? fh.seekToEnd()
     for it in items {
         let sig = signature(path: it.path, modDate: it.modDate)
         if let e = meta.images[it.path], e.sig == sig {
@@ -161,11 +219,13 @@ func syncIndex(items: [(path: String, modDate: Date?, tags: [String])], progress
         }
         let faces = faceprints(it.path)
         if meta.dim == 0, let f = faces.first { meta.dim = f.count }
-        var assigned: [FaceCluster] = []
+        var refs: [FaceRef] = []
         for f in faces where f.count == meta.dim {
-            assigned.append(FaceCluster(vec: f, cluster: assign(f)))
+            fh.write(f.withUnsafeBytes { Data($0) })   // append row to faces.bin
+            refs.append(FaceRef(row: meta.rows, cluster: assign(f)))
+            meta.rows += 1
         }
-        meta.images[it.path] = ImageEntry(sig: sig, faces: assigned, tags: it.tags)
+        meta.images[it.path] = ImageEntry(sig: sig, faces: refs, tags: it.tags)
         done += 1
         if done % 25 == 0 { saveMeta(); progress(done, todo.count) }
     }
@@ -224,16 +284,38 @@ syncIndex(items: need) { done, total in
 
 let names = clusterNames()
 var out: [RawSuggestion] = []
-for file in req.files {
-    guard let entry = meta.images[file.path] else { continue }
-    let own = Set(file.tags)
-    var seen = Set<String>()
-    for face in entry.faces {
-        guard let name = names[face.cluster], !own.contains(name), !seen.contains(name) else { continue }
-        seen.insert(name)
-        let conf = max(0, min(1, Double(cosine(face.vec, centroid(meta.clusters[face.cluster]!)))))
-        out.append(RawSuggestion(path: file.path, tag: name, confidence: conf, source: SOURCE))
+let dim = meta.dim
+if dim > 0, let fh = try? FileHandle(forReadingFrom: binURL) {
+    let fd = fh.fileDescriptor
+    let size = Int(lseek(fd, 0, SEEK_END))
+    let raw = size >= dim * 4 ? mmap(nil, size, PROT_READ, MAP_PRIVATE, fd, 0) : nil
+    let base = (raw != nil && raw != MAP_FAILED) ? raw!.assumingMemoryBound(to: Float.self) : nil
+
+    for file in req.files {
+        guard let entry = meta.images[file.path] else { continue }
+        let own = Set(file.tags)
+        var seen = Set<String>()
+        for face in entry.faces {
+            guard let name = names[face.cluster], !own.contains(name), !seen.contains(name) else { continue }
+            seen.insert(name)
+            // Confidence = this face's cohesion with its cluster centroid, read
+            // straight off the mmap'd row (no vectors in meta anymore).
+            var conf = 0.7
+            if let base, (face.row + 1) * dim * 4 <= size,
+               let cluster = meta.clusters[face.cluster] {
+                let cent = centroid(cluster)
+                var d: Float = 0
+                cent.withUnsafeBufferPointer { pc in
+                    vDSP_dotpr(UnsafePointer(base).advanced(by: face.row * dim), 1,
+                               pc.baseAddress!, 1, &d, vDSP_Length(dim))
+                }
+                conf = max(0, min(1, Double(d)))
+            }
+            out.append(RawSuggestion(path: file.path, tag: name, confidence: conf, source: SOURCE))
+        }
     }
+    if let raw, raw != MAP_FAILED { munmap(raw, size) }
+    try? fh.close()
 }
 
 let encoder = JSONEncoder()
