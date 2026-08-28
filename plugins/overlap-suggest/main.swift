@@ -60,6 +60,7 @@ struct Config: Codable {
     var joinThreshold: Float = 0.84  // face-cluster join cosine
     var nameMinShare = 0.5           // cluster-name learning: share of cluster
     var nameMinConcentration = 0.6   //   ... and of the tag's global use
+    var maxFileMB = 25               // skip indexing files larger than this
     var labelEnsembleAlpha = 0.3     // kNN sim = (1-α)·FeaturePrint + α·classifier-labels
     var faceQualityMin: Float = 0.2  // faces below this quality don't join clusters
     var clsMapMinP = 0.5             // learned P(userTag|label) acceptance
@@ -103,6 +104,7 @@ struct Config: Codable {
         lambda = f(.lambda, 0.2); mutexFloor = f(.mutexFloor, 0.02); minSupport = f(.minSupport, 5)
         joinThreshold = f(.joinThreshold, 0.84); nameMinShare = f(.nameMinShare, 0.5)
         nameMinConcentration = f(.nameMinConcentration, 0.6)
+        maxFileMB = f(.maxFileMB, 25)
         labelEnsembleAlpha = f(.labelEnsembleAlpha, 0.3); faceQualityMin = f(.faceQualityMin, 0.2)
         clsMapMinP = f(.clsMapMinP, 0.5); clsMapMinSupport = f(.clsMapMinSupport, 8)
         coldStartMinTagged = f(.coldStartMinTagged, 20)
@@ -418,6 +420,20 @@ func syncIndex(items: [(path: String, modDate: Date?, tags: [String])],
             : existing!
         rec.sig = sig
         rec.tags = it.tags
+
+        // Oversized files (huge scans/panoramas) aren't worth the decode at all:
+        // mark every signal present-but-empty so they're never retried. Stat only
+        // happens here — on files that already need work.
+        let bytes = (try? FileManager.default.attributesOfItem(atPath: it.path)[.size] as? Int64)
+            .flatMap { $0 } ?? 0
+        if bytes > Int64(config.maxFileMB) * 1_048_576 {
+            rec.fpRow = -1; rec.faces = []; rec.labels = []; rec.ocr = []
+            rec.aes = AesRef(score: 0, utility: false)
+            meta.images[it.path] = rec
+            done += 1
+            if done % 10 == 0 { saveMeta(); progress(done, todo.count) }
+            continue
+        }
 
         // Build the request list for exactly the missing signals — one decode.
         var requests: [VNRequest] = []
