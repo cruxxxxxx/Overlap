@@ -513,33 +513,64 @@ struct ResultsGridView: View {
     // MARK: Grouped-by-suggestions grid (queue)
 
     @State private var collapsedSections: Set<String> = []
+    @State private var groupFilter = ""
+
+    /// Sections narrowed by the group-filter field (matches the suggested tag,
+    /// case-insensitive; leftover section matches "no suggestions").
+    private var filteredSections: [SuggestionSection] {
+        let q = groupFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return store.queueSections }
+        return store.queueSections.filter { sec in
+            (sec.suggestion?.tag ?? "no suggestions").lowercased().contains(q)
+        }
+    }
 
     /// Photos-style sections: one per suggested tag, its member thumbnails
     /// together under a pinned header. A file suggested for several tags appears
     /// in each section (selection is by file id, so every copy highlights).
     private var groupedGrid: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
-                ForEach(store.queueSections) { section in
-                    Section(header: sectionHeader(section)) {
-                        if !collapsedSections.contains(section.id) {
-                            LazyVGrid(columns: columns, spacing: 12) {
-                                ForEach(section.items) { item in
-                                    ThumbnailCell(item: item, size: thumbSize,
-                                                  selected: store.selection.contains(item.id))
-                                        .id("\(section.id)|\(item.id)")   // compound: same file may repeat
-                                        .onTapGesture(count: 2) { handleOpen(item) }
-                                        .onTapGesture { handleClick(item, within: section.items) }
-                                        .onDrag { NSItemProvider(object: item.url as NSURL) }
-                                        .contextMenu { contextMenu(for: item) }
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.secondary)
+                TextField("Filter groups (e.g. a name or tag)", text: $groupFilter)
+                    .textFieldStyle(.plain).font(.caption)
+                if !groupFilter.isEmpty {
+                    Button { groupFilter = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text("\(filteredSections.count) group\(filteredSections.count == 1 ? "" : "s")")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
+                    ForEach(filteredSections) { section in
+                        Section(header: sectionHeader(section)) {
+                            if !collapsedSections.contains(section.id) {
+                                LazyVGrid(columns: columns, spacing: 12) {
+                                    ForEach(section.items) { item in
+                                        // Exclusive membership: each file lives in exactly
+                                        // one section, so plain ids are unique and selection
+                                        // highlights exactly one cell.
+                                        ThumbnailCell(item: item, size: thumbSize,
+                                                      selected: store.selection.contains(item.id))
+                                            .id(item.id)
+                                            .onTapGesture(count: 2) { handleOpen(item) }
+                                            .onTapGesture { handleClick(item, within: section.items) }
+                                            .onDrag { NSItemProvider(object: item.url as NSURL) }
+                                            .contextMenu { contextMenu(for: item) }
+                                    }
                                 }
+                                .padding(.horizontal, 12).padding(.bottom, 16)
                             }
-                            .padding(.horizontal, 12).padding(.bottom, 16)
                         }
                     }
                 }
+                .padding(.top, 4)
             }
-            .padding(.top, 4)
         }
         .tutorialAnchor(.grid)
     }

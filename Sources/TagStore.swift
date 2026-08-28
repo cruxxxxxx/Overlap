@@ -1258,34 +1258,58 @@ final class TagStore: ObservableObject {
         })
     }
 
-    /// Derive the sectioned view: each queue suggestion's members intersected
-    /// with the currently visible `results` (so type filters / apply-to-library
-    /// shrink sections without a plugin run), face groups first by size, then
-    /// other tags by size, confidence tiebreak; trailing leftover section.
+    /// Section order from the previous rebuild, so applying/tagging doesn't
+    /// reshuffle groups under the user's scroll position.
+    private var queueSectionOrder: [String: Int] = [:]
+
+    /// Derive the sectioned view from `queueSuggestions` ∩ visible `results`.
+    /// Each file appears in EXACTLY ONE section — its best-ranked suggestion —
+    /// so selection never highlights ghosts in other groups and applying a tag
+    /// can't shift unrelated sections. Section order is sticky across rebuilds
+    /// (new sections rank by faces-first/size/confidence and append after known
+    /// ones); trailing leftover section holds files nothing claimed.
     func rebuildQueueSections() {
         guard queueGrouping, mode == .queue, !queueSuggestions.isEmpty else {
             queueSections = []
+            queueSectionOrder = [:]
             return
         }
-        var covered = Set<String>()
-        var sections: [SuggestionSection] = []
+        // Candidate members per suggestion (visible + not already carrying it).
+        var candidates: [(s: TagSuggestion, members: [FileItem])] = []
         for s in queueSuggestions {
             let members = results.filter { s.paths.contains($0.id) && !$0.tagSet.contains(s.tag) }
-            guard !members.isEmpty else { continue }
-            covered.formUnion(members.map(\.id))
-            sections.append(SuggestionSection(suggestion: s, items: members))
+            if !members.isEmpty { candidates.append((s, members)) }
         }
-        sections.sort { a, b in
-            let (sa, sb) = (a.suggestion!, b.suggestion!)
-            if sa.isGroup != sb.isGroup { return sa.isGroup }
-            if a.items.count != b.items.count { return a.items.count > b.items.count }
-            return sa.confidence > sb.confidence
+        // Rank: previously-seen sections keep their order; new ones sort by
+        // faces-first, then size, then confidence, and follow the known ones.
+        candidates.sort { a, b in
+            let (oa, ob) = (queueSectionOrder[a.s.tag], queueSectionOrder[b.s.tag])
+            switch (oa, ob) {
+            case let (x?, y?): return x < y
+            case (.some, .none): return true
+            case (.none, .some): return false
+            case (.none, .none):
+                if a.s.isGroup != b.s.isGroup { return a.s.isGroup }
+                if a.members.count != b.members.count { return a.members.count > b.members.count }
+                return a.s.confidence > b.s.confidence
+            }
         }
-        let leftover = results.filter { !covered.contains($0.id) }
+        // Exclusive assignment: first (best-ranked) section to claim a file wins.
+        var claimed = Set<String>()
+        var sections: [SuggestionSection] = []
+        for c in candidates {
+            let mine = c.members.filter { !claimed.contains($0.id) }
+            guard !mine.isEmpty else { continue }
+            claimed.formUnion(mine.map(\.id))
+            sections.append(SuggestionSection(suggestion: c.s, items: mine))
+        }
+        let leftover = results.filter { !claimed.contains($0.id) }
         if !leftover.isEmpty {
             sections.append(SuggestionSection(suggestion: nil, items: leftover))
         }
         queueSections = sections
+        queueSectionOrder = Dictionary(uniqueKeysWithValues:
+            sections.compactMap { $0.suggestion.map(\.tag) }.enumerated().map { ($1, $0) })
     }
 
     /// Drop one queue-wide suggestion (after Apply All) and rebuild sections.
