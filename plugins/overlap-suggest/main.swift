@@ -1,6 +1,7 @@
 import Foundation
 import Vision
 import Accelerate
+import ImageIO
 
 // Overlap "Overlap Suggest" plugin — the unified multi-signal suggester.
 //
@@ -179,6 +180,23 @@ func cosine(_ a: [Float], _ b: [Float]) -> Float {
     a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in
         vDSP_dotpr(pa.baseAddress!, 1, pb.baseAddress!, 1, &d, vDSP_Length(a.count)) } }
     return d
+}
+
+/// Decode a bounded-size image once for ALL Vision requests. Without this, every
+/// request runs at native resolution — a 256MB scan wedges OCR for minutes. All
+/// our signals are fine at ~2000px (FeaturePrint/classify/faces downscale
+/// internally anyway; OCR .fast at 2016px reads normal text easily).
+func downsampledImage(_ path: String, maxPixel: Int = 2016) -> CGImage? {
+    guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL,
+                                               [kCGImageSourceShouldCache: false] as CFDictionary)
+    else { return nil }
+    let opts: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        kCGImageSourceShouldCacheImmediately: true,
+    ]
+    return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
 }
 
 /// mtime fingerprint; host-supplied modDate avoids a stat on the hot path.
@@ -431,7 +449,10 @@ func syncIndex(items: [(path: String, modDate: Date?, tags: [String])],
         }
 
         if !requests.isEmpty {
-            let handler = VNImageRequestHandler(url: URL(fileURLWithPath: it.path), options: [:])
+            // One bounded decode feeds every request; URL handler only as fallback.
+            let handler = downsampledImage(it.path)
+                .map { VNImageRequestHandler(cgImage: $0, options: [:]) }
+                ?? VNImageRequestHandler(url: URL(fileURLWithPath: it.path), options: [:])
             do {
                 try handler.perform(requests)
             } catch {
@@ -498,7 +519,7 @@ func syncIndex(items: [(path: String, modDate: Date?, tags: [String])],
         }
         meta.images[it.path] = rec
         done += 1
-        if done % 25 == 0 { saveMeta(); progress(done, todo.count) }
+        if done % 10 == 0 { saveMeta(); progress(done, todo.count) }
     }
     if done > 0 { saveMeta() }
 }
