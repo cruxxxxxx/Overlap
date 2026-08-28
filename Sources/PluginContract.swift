@@ -16,6 +16,57 @@ struct SuggestRequest: Codable {
     var files: [RequestFile]          // the targets to suggest tags FOR
     var knownTags: [String]?          // sent only when manifest.wantsKnownTags
     var library: [LibraryItem]?       // sent only when manifest.wantsLibrary
+    var settings: [String: SettingValue]?  // merged values for manifest.settings keys
+}
+
+// MARK: - Plugin-declared settings (rendered by the host's Plugin Settings UI)
+
+/// A JSON scalar setting value — bool, number, or string. Tolerant decode so any
+/// language's JSON maps cleanly.
+enum SettingValue: Codable, Hashable {
+    case bool(Bool), number(Double), string(String)
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let b = try? c.decode(Bool.self) { self = .bool(b); return }
+        if let n = try? c.decode(Double.self) { self = .number(n); return }
+        self = .string(try c.decode(String.self))
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .bool(let b): try c.encode(b)
+        case .number(let n): try c.encode(n)
+        case .string(let s): try c.encode(s)
+        }
+    }
+
+    var boolValue: Bool? { if case .bool(let b) = self { return b }; return nil }
+    var numberValue: Double? { if case .number(let n) = self { return n }; return nil }
+    var stringValue: String? { if case .string(let s) = self { return s }; return nil }
+}
+
+/// One tunable a plugin exposes. The host renders bool → toggle, number → slider
+/// (min/max/step), choice → picker; groups by `section`; and injects the merged
+/// values into every request's `settings`.
+struct PluginSetting: Codable {
+    let key: String
+    let type: String                 // "bool" | "number" | "choice"
+    let label: String
+    var help: String? = nil
+    var section: String? = nil
+    var min: Double? = nil
+    var max: Double? = nil
+    var step: Double? = nil
+    var choices: [Choice]? = nil
+    let defaultValue: SettingValue
+
+    struct Choice: Codable { let value: String; let label: String }
+
+    enum CodingKeys: String, CodingKey {
+        case key, type, label, help, section, min, max, step, choices
+        case defaultValue = "default"
+    }
 }
 
 struct RequestFile: Codable {
@@ -78,6 +129,7 @@ struct PluginManifest: Codable {
     var wantsKnownTags = false
     var wantsLibrary = false          // receive the full tagged corpus
     var timeoutMs = 5000
+    var settings: [PluginSetting]? = nil   // tunables the host renders + injects
 }
 
 /// A manifest paired with its resolved on-disk location.

@@ -109,6 +109,27 @@ unsandboxed, so plugins have normal filesystem access).
 The authoritative types live in
 [`Sources/PluginContract.swift`](../Sources/PluginContract.swift).
 
+### Settings (optional)
+
+Declare tunables in the manifest and Overlap renders them in **Plugins ▸ Plugin
+Settings…** (toggles, sliders, pickers) and injects the merged values into every
+request as `settings: {key: value}`:
+
+```json
+"settings": [
+  { "key": "minConfidence", "type": "number", "label": "Minimum confidence",
+    "section": "Tuning", "min": 0, "max": 0.9, "step": 0.05, "default": 0.3,
+    "help": "Suggestions below this score are dropped" },
+  { "key": "channelFaces", "type": "bool", "label": "Faces", "section": "Channels",
+    "default": true }
+]
+```
+
+`type` is `bool` (toggle), `number` (slider with `min`/`max`/`step`), or `choice`
+(picker over `choices: [{value,label}]`). Treat request `settings` as overrides
+over your own defaults; ignore unknown keys. A request without `settings` (older
+host) must keep working. `overlap-suggest/` is the reference implementation.
+
 ### Progress (stderr, optional)
 
 A plugin that does heavy first-run work (embedding a whole library, building an

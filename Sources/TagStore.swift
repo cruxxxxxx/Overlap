@@ -76,6 +76,15 @@ final class TagStore: ObservableObject {
     @Published private(set) var groupPluginID: String? =
         UserDefaults.standard.string(forKey: "groupPluginID")
 
+    /// User-tuned plugin settings: pluginID -> key -> value, persisted as JSON.
+    /// Merged over each plugin's declared defaults and injected into requests.
+    @Published private(set) var pluginSettings: [String: [String: SettingValue]] = {
+        guard let data = UserDefaults.standard.data(forKey: "pluginSettings"),
+              let map = try? JSONDecoder().decode([String: [String: SettingValue]].self, from: data)
+        else { return [:] }
+        return map
+    }()
+
     /// Background plugin index warm-up: after the catalog loads, the similarity
     /// plugins are fed the full library with NO target files, so they build/refresh
     /// their persistent indexes off the user's critical path. A thin progress
@@ -1179,6 +1188,7 @@ final class TagStore: ObservableObject {
         lastSentCorpusSig = sig
         let known = Array(knownTags)
         let kinds = Set(items.map(\.kind))
+        let settings = pluginSettings
         var disabled = disabledPluginIDs
         if let onlyPlugin {   // restrict this run to a single source
             disabled.formUnion(PluginRegistry.discover().map(\.id).filter { $0 != onlyPlugin })
@@ -1187,7 +1197,9 @@ final class TagStore: ObservableObject {
         Task.detached(priority: .userInitiated) {
             let merged = await SuggestionEngine.run(files: files, library: library,
                                                     knownTags: known, kinds: kinds,
-                                                    disabledIDs: disabled, onProgress: onProgress)
+                                                    disabledIDs: disabled,
+                                                    pluginSettings: settings,
+                                                    onProgress: onProgress)
             await MainActor.run { completion(merged) }
         }
     }
@@ -1294,6 +1306,45 @@ final class TagStore: ObservableObject {
         }
     }
 
+    /// Declared defaults overlaid with the user's stored tweaks; nil when the
+    /// plugin declares no settings (host then omits `settings` from the request).
+    nonisolated static func effectiveSettings(for plugin: DiscoveredPlugin,
+                                              stored: [String: [String: SettingValue]]) -> [String: SettingValue]? {
+        guard let schema = plugin.manifest.settings, !schema.isEmpty else { return nil }
+        var merged: [String: SettingValue] = [:]
+        for s in schema { merged[s.key] = s.defaultValue }
+        for (k, v) in stored[plugin.id] ?? [:] where merged[k] != nil { merged[k] = v }
+        return merged
+    }
+
+    /// Set one plugin setting and re-suggest everything live — tuning has
+    /// immediate, visible effect.
+    func setPluginSetting(_ pluginID: String, key: String, value: SettingValue) {
+        pluginSettings[pluginID, default: [:]][key] = value
+        persistPluginSettings()
+        resuggestAfterSettingsChange()
+    }
+
+    func resetPluginSettings(_ pluginID: String) {
+        pluginSettings.removeValue(forKey: pluginID)
+        persistPluginSettings()
+        resuggestAfterSettingsChange()
+    }
+
+    private func persistPluginSettings() {
+        if let d = try? JSONEncoder().encode(pluginSettings) {
+            UserDefaults.standard.set(d, forKey: "pluginSettings")
+        }
+    }
+
+    private func resuggestAfterSettingsChange() {
+        clearSuggestions()
+        queueSuggestions = []
+        rebuildQueueSections()
+        autoSuggestSelection()
+        if mode == .queue && queueGrouping { suggestQueue() }
+    }
+
     /// Kick a background index warm-up (no target files — plugins just sync their
     /// persistent indexes over the library). Skipped when the corpus hasn't
     /// changed since the last warm-up, unless forced from the Plugins menu.
@@ -1308,9 +1359,11 @@ final class TagStore: ObservableObject {
         lastSentCorpusSig = sig   // this run delivers the corpus; later runs send []
         let known = Array(knownTags)
         let disabled = disabledPluginIDs
+        let settings = pluginSettings
         Task.detached(priority: .utility) {
             _ = await SuggestionEngine.run(files: [], library: library, knownTags: known,
                                            kinds: [.image], disabledIDs: disabled,
+                                           pluginSettings: settings,
                                            onProgress: { [weak self] line in
                 Task { @MainActor in self?.warmupProgress = line }
             })

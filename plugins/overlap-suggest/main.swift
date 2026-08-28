@@ -31,11 +31,33 @@ struct LibraryItem: Codable {
     let path: String; let kind: String
     let tags: [String]; let modDate: Date?
 }
+/// JSON scalar from the host's Plugin Settings UI (see manifest "settings").
+enum SettingValue: Codable {
+    case bool(Bool), number(Double), string(String)
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let b = try? c.decode(Bool.self) { self = .bool(b); return }
+        if let n = try? c.decode(Double.self) { self = .number(n); return }
+        self = .string(try c.decode(String.self))
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .bool(let b): try c.encode(b)
+        case .number(let n): try c.encode(n)
+        case .string(let s): try c.encode(s)
+        }
+    }
+    var boolValue: Bool? { if case .bool(let b) = self { return b }; return nil }
+    var numberValue: Double? { if case .number(let n) = self { return n }; return nil }
+}
+
 struct SuggestRequest: Codable {
     let protocolVersion: Int?
     let files: [RequestFile]
     let knownTags: [String]?
     let library: [LibraryItem]?
+    let settings: [String: SettingValue]?
 }
 struct RawSuggestion: Codable {
     let path: String; let tag: String
@@ -254,7 +276,7 @@ let fpBinURL = cacheDir.appendingPathComponent("featureprint.bin")
 let faceBinURL = cacheDir.appendingPathComponent("faces.bin")
 let configURL = cacheDir.appendingPathComponent("config.json")
 
-let config: Config = {
+var config: Config = {
     if let d = try? Data(contentsOf: configURL),
        let c = try? JSONDecoder().decode(Config.self, from: d) { return c }
     let c = Config()
@@ -262,6 +284,24 @@ let config: Config = {
     if let d = try? enc.encode(c) { try? d.write(to: configURL) }
     return c
 }()
+
+// Suggestion channels, gated by host settings at QUERY time only — indexing
+// still stores every signal, so re-enabling a channel needs no re-index.
+var chFaces = true, chVisual = true, chCls = true, chOCR = true
+
+/// Host-tuned settings override config.json which overrides built-in defaults.
+func applyHostSettings(_ s: [String: SettingValue]?) {
+    guard let s else { return }
+    if let v = s["channelFaces"]?.boolValue { chFaces = v }
+    if let v = s["channelVisual"]?.boolValue { chVisual = v }
+    if let v = s["channelClassifier"]?.boolValue { chCls = v }
+    if let v = s["channelOCR"]?.boolValue { chOCR = v }
+    if let v = s["minConfidence"]?.numberValue { config.minConfidence = v }
+    if let v = s["highPrecisionMode"]?.boolValue { config.highPrecisionMode = v }
+    if let v = s["k"]?.numberValue { config.k = max(1, Int(v)) }
+    if let v = s["lambda"]?.numberValue { config.lambda = v }
+    if let v = s["maxFileMB"]?.numberValue { config.maxFileMB = max(1, Int(v)) }
+}
 
 func stderrLine(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
 
@@ -578,6 +618,7 @@ guard let req = try? decoder.decode(SuggestRequest.self, from: input) else {
     stderrLine("overlap-suggest: bad request JSON")
     exit(1)
 }
+applyHostSettings(req.settings)
 
 // Dedupe library + targets by path, union tags (a stale target copy must never
 // clobber the library's authoritative tags).
@@ -716,7 +757,7 @@ for file in req.files {
 
     // Channel A — kNN borrowed tags; neighbor similarity is the in-process
     // ensemble: (1-α)·FeaturePrint + α·classifier-label cosine.
-    if !coldStart, let blob = fpBlob, let tRow = rec.fpRow, tRow >= 0, meta.fpDim > 0,
+    if chVisual, !coldStart, let blob = fpBlob, let tRow = rec.fpRow, tRow >= 0, meta.fpDim > 0,
        (tRow + 1) * meta.fpDim * 4 <= blob.size {
         let base = blob.ptr.assumingMemoryBound(to: Float.self)
         let dim = meta.fpDim
@@ -747,7 +788,7 @@ for file in req.files {
     }
 
     // Channel C — classifier labels mapped into the user's vocabulary.
-    if !targetLabels.isEmpty {
+    if chCls, !targetLabels.isEmpty {
         var clsScore: [String: Double] = [:]
         for (i, conf) in targetLabels {
             for (tag, p) in clsMap[i] ?? [] where !own.contains(tag) {
@@ -760,7 +801,7 @@ for file in req.files {
     }
 
     // Channel D — OCR text naming a tag: the highest-precision evidence we have.
-    if let tokens = rec.ocr, !tokens.isEmpty {
+    if chOCR, let tokens = rec.ocr, !tokens.isEmpty {
         for tokenId in tokens where tokenId < meta.tokenVocab.count {
             let token = meta.tokenVocab[tokenId]
             if let tag = leafToTag[token], !own.contains(tag) {
@@ -776,7 +817,7 @@ for file in req.files {
     }
 
     // Channel B — persons (cluster names; confidence = face·centroid cosine).
-    if let blob = faceBlob, meta.faceDim > 0 {
+    if chFaces, let blob = faceBlob, meta.faceDim > 0 {
         let base = blob.ptr.assumingMemoryBound(to: Float.self)
         let dim = meta.faceDim
         var seen = Set<String>()
@@ -841,7 +882,7 @@ for file in req.files {
     // this file (or the whole corpus is cold), surface Apple's calibrated labels
     // as obj/<Label> — the researched cold-start answer (P≥.9 filter at store
     // time; far above the 0.221 bare-name CLIP baseline). Cap 3.
-    if final.isEmpty, !targetLabels.isEmpty {
+    if final.isEmpty, chCls, !targetLabels.isEmpty {
         let raw = targetLabels
             .sorted { $0.value > $1.value }
             .prefix(3)

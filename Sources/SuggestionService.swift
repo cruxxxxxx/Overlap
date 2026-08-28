@@ -14,6 +14,7 @@ enum SuggestionEngine {
     nonisolated static func run(files: [RequestFile], library: [LibraryItem],
                                 knownTags: [String], kinds: Set<FileKind>,
                                 disabledIDs: Set<String> = [],
+                                pluginSettings: [String: [String: SettingValue]] = [:],
                                 onProgress: (@Sendable (String) -> Void)? = nil) async -> [TagSuggestion] {
         let plugins = PluginRegistry.discover().filter { p in
             !disabledIDs.contains(p.id) && kinds.contains(where: p.handles)
@@ -25,7 +26,8 @@ enum SuggestionEngine {
                     let req = SuggestRequest(
                         files: files,
                         knownTags: plugin.manifest.wantsKnownTags ? knownTags : nil,
-                        library: plugin.manifest.wantsLibrary ? library : nil)
+                        library: plugin.manifest.wantsLibrary ? library : nil,
+                        settings: TagStore.effectiveSettings(for: plugin, stored: pluginSettings))
                     return invoke(plugin, request: req, onProgress: onProgress)
                 }
             }

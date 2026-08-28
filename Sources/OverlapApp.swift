@@ -38,6 +38,9 @@ struct OverlapApp: App {
                     }
                 }
                 Divider()
+                Button("Plugin Settings…") {
+                    NotificationCenter.default.post(name: .overlapShowPluginSettings, object: nil)
+                }
                 Button(store.warmingUp ? "Warming Up Index…" : "Warm Up Suggestion Index") {
                     store.warmUpPlugins(force: true)
                 }
@@ -61,11 +64,16 @@ struct OverlapApp: App {
     }
 }
 
+extension Notification.Name {
+    static let overlapShowPluginSettings = Notification.Name("overlapShowPluginSettings")
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: TagStore
     @State private var showStats = false
     @State private var showPrivacy = false
     @State private var showSlideshow = false
+    @State private var showPluginSettings = false
 
     var body: some View {
         NavigationSplitView {
@@ -158,6 +166,12 @@ struct ContentView: View {
             }
         }
         .navigationTitle("Overlap")
+        .onReceive(NotificationCenter.default.publisher(for: .overlapShowPluginSettings)) { _ in
+            showPluginSettings = true
+        }
+        .sheet(isPresented: $showPluginSettings) {
+            PluginSettingsView().environmentObject(store)
+        }
         .sheet(isPresented: $showStats) { StatsView().environmentObject(store) }
         .sheet(isPresented: $showPrivacy) { PrivacyView().environmentObject(store) }
         .sheet(isPresented: $showSlideshow) {
