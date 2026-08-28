@@ -159,11 +159,12 @@ in with **zero app changes**.
 
 | plugin | what it does | library? |
 |---|---|---|
-| `plugins/folderkind/` | folder name + file kind + neighbor tags — dependency-free template | yes |
-| `plugins/mockcluster/` | deterministic fake clusters — exercises the group-chip UX with no ML | no |
-| `plugins/visionknn/` | Apple Vision FeaturePrint kNN over the tagged library (real similarity) | yes |
-| `plugins/facecluster/` | Apple Vision faceprints → stable person-identity tags (real clustering) | yes |
-| `plugins/overlap-suggest/` | **unified multi-signal suggester**: FeaturePrint kNN + face identities + classifier labels + OCR + face-quality gating + aesthetics, fused (noisy-OR) with co-occurrence rerank/mutex learned from your tags; migrates the visionknn/facecluster caches; tunables in its cache-dir `config.json` | yes |
+| `plugins/overlap-suggest/` | **the shipping suggester** — FeaturePrint kNN + face identities + classifier labels + OCR + face-quality gating + aesthetics, fused (noisy-OR) with co-occurrence rerank/mutex learned from your tags; declares tunables via manifest `settings` (rendered in Plugins ▸ Plugin Settings…) | yes |
+| `plugins/folderkind/` | folder name + file kind + neighbor tags — dependency-free reference/template (not installed by default) | yes |
+| `plugins/mockcluster/` | deterministic fake clusters — exercises the group-chip UX with no ML (not installed by default) | no |
+
+(The earlier `visionknn` and `facecluster` plugins were merged into `overlap-suggest`,
+which migrates their caches automatically; their dirs are removed.)
 
 Build and install all of them:
 
