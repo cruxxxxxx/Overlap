@@ -20,6 +20,19 @@ struct ResultsGridView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Warm-up strip: plain row, no transition/safeAreaInset — inserting
+            // animated content into the NavigationSplitView's safe area crashed
+            // AppKit's constraint pass (NSHostingView display-cycle exception).
+            if store.warmingUp {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(store.warmupProgress ?? "Preparing suggestions…")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                }
+                .padding(.horizontal, 12).padding(.vertical, 4)
+                Divider()
+            }
             if store.mode == .queue { queueBar } else { QueryBar(thumbSize: $thumbSize) }
             Divider()
             if store.results.isEmpty {
