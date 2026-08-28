@@ -1,0 +1,12 @@
+{
+  "name": "Overlap Suggest",
+  "id": "com.overlap.suggest",
+  "version": "0.1.0",
+  "protocolVersion": 1,
+  "exec": "overlap-suggest",
+  "handles": ["image"],
+  "batch": true,
+  "wantsKnownTags": true,
+  "wantsLibrary": true,
+  "timeoutMs": 600000
+}
