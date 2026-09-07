@@ -1,9 +1,10 @@
 # Writing an Overlap suggestion plugin
 
-Overlap has one extension point: **tag suggestions**. A plugin is a standalone
-executable — in **any language** — that Overlap runs to suggest tags for the
-selected files. Nothing links against the app; plugins ship and update
-independently.
+Overlap has two extension points: **tag suggestions** and **semantic search**
+(see [Search plugins](#search-plugins-capabilities-search)). A plugin is a
+standalone executable — in **any language** — that Overlap runs to suggest tags
+for the selected files (or rank files for a query). Nothing links against the
+app; plugins ship and update independently.
 
 Today Overlap includes one reference plugin (`plugins/folderkind/`). This page
 is how to write your own.
@@ -67,6 +68,8 @@ never blocks the others or the app.
 | `wantsKnownTags` | include the user's full tag vocabulary in the request |
 | `wantsLibrary` | include the whole tagged-library corpus (for similarity/clustering) |
 | `timeoutMs` | kill the process after this long |
+| `capabilities` | optional; `["suggest"]` (default) and/or `["search"]` — see [Search plugins](#search-plugins-capabilities-search) |
+| `queryTimeoutMs` | optional, search plugins only: budget for one query (indexing uses `timeoutMs`) |
 
 ---
 
@@ -155,11 +158,53 @@ in with **zero app changes**.
 
 ---
 
+## Search plugins (`capabilities: ["search"]`)
+
+A second extension point, same process contract: **semantic search**. Declare
+`"capabilities": ["search"]` (and `wantsLibrary: true`) and Overlap stops
+sending you suggest traffic and instead drives you in two shapes:
+
+| shape | request | expected response |
+|---|---|---|
+| **index warm-up** | `files: []`, `library: [every image in the corpus]`, no `query` | embed what's new into your own persisted index; `hits: []` |
+| **query** | `files: []`, `library: []`, `query: "girl with spiral hair"` | `hits: [{ "path", "score" }]`, best first |
+
+Request/response fields beyond the suggest contract:
+
+```json
+// request (additive)
+{ "query": "girl with spiral hair" }
+
+// response (additive; `suggestions` may be omitted or empty)
+{ "protocolVersion": 1, "suggestions": [],
+  "hits": [ { "path": "/Users/me/Pictures/x.jpg", "score": 0.31 } ],
+  "indexedCount": 4312 }
+```
+
+- The corpus is **every image under the scope and the watched folders, tagged
+  or not** (unlike `wantsLibrary` for suggesters, which is tagged files only).
+  `LibraryItem.tags` is `[]` for untagged files.
+- Hits are **not** path-validated against `files` — returning files the host
+  never mentioned is the point. Overlap orders the grid by `score` and, when a
+  tag query is active, keeps only hits that pass it.
+- `indexedCount` lets the UI say "index not built yet" instead of "no matches".
+- Warm-up runs after the suggestion warm-up (chained, never concurrent), when
+  the scope or watched folders change, and from Plugins ▸ Rebuild Search Index.
+  Progress lines on stderr show in the strip above the grid.
+- A query spawns a fresh process, so keep model load cheap or cached; Overlap
+  submits on Return, not per keystroke.
+
+`plugins/overlap-clip/` is the reference: MobileCLIP-S2 (Core ML) image + text
+encoders, downloaded on first use.
+
+---
+
 ## Bundled plugins
 
 | plugin | what it does | library? |
 |---|---|---|
 | `plugins/overlap-suggest/` | **the shipping suggester** — FeaturePrint kNN + face identities + classifier labels + OCR + face-quality gating + aesthetics, fused (noisy-OR) with co-occurrence rerank/mutex learned from your tags; declares tunables via manifest `settings` (rendered in Plugins ▸ Plugin Settings…) | yes |
+| `plugins/overlap-clip/` | **semantic search** (`capabilities: ["search"]`) — MobileCLIP-S2 text→image search over every image in the scope + watched folders; ~200 MB of Core ML models fetched on first use into the plugin cache | yes |
 | `plugins/folderkind/` | folder name + file kind + neighbor tags — dependency-free reference/template (not installed by default) | yes |
 | `plugins/mockcluster/` | deterministic fake clusters — exercises the group-chip UX with no ML (not installed by default) | no |
 

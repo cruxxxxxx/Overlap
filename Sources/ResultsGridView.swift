@@ -23,10 +23,11 @@ struct ResultsGridView: View {
             // Warm-up strip: plain row, no transition/safeAreaInset — inserting
             // animated content into the NavigationSplitView's safe area crashed
             // AppKit's constraint pass (NSHostingView display-cycle exception).
-            if store.warmingUp {
+            if store.warmingUp || store.searchIndexing || store.exportProgress != nil {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text(store.warmupProgress ?? "Preparing suggestions…")
+                    Text(store.exportProgress ?? store.warmupProgress ?? store.searchProgress
+                         ?? (store.warmingUp ? "Preparing suggestions…" : "Indexing images for search…"))
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                 }
@@ -195,6 +196,10 @@ struct ResultsGridView: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
         }
+        // Constant height: the spinner/progress text and chips appear the moment
+        // a click kicks off auto-suggest. Letting this row grow/shrink resized
+        // the grid's viewport, drifting the lazy scroll on every selection.
+        .frame(height: 34)
     }
 
     /// Tap ✨: master on/off. On → suggestions repopulate for the current
@@ -372,6 +377,16 @@ struct ResultsGridView: View {
 
     /// Returns nil to swallow the event, or the event to let it pass through.
     private func handleKey(_ event: NSEvent) -> NSEvent? {
+        // ⌘F focuses the semantic search field — even from another text field
+        // (the sidebar filter is first responder at launch), so it goes before
+        // the text-field pass-through. Handled here, not as a menu shortcut, so
+        // it can't collide with Edit ▸ Find.
+        if event.keyCode == 3, event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.shift), store.searchAvailable, store.mode != .queue {
+            store.requestSearchFocus()
+            return nil
+        }
+
         let responder = NSApp.keyWindow?.firstResponder
         if responder is NSText || responder is NSTextView { return event }
 
@@ -559,7 +574,12 @@ struct ResultsGridView: View {
             .padding(.horizontal, 12).padding(.vertical, 5)
             Divider()
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
+                // Headers scroll inline (NOT pinned): a pinned-header LazyVStack
+                // drops its offscreen row-height estimates on every store
+                // republish (e.g. a selection change) and drifts the scroll
+                // position — clicking a tile while scrolled down made the list
+                // jump. Inline headers reflow-free.
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredSections) { section in
                         Section(header: sectionHeader(section)) {
                             if !collapsedSections.contains(section.id) {
@@ -700,6 +720,23 @@ struct ResultsGridView: View {
                     .foregroundStyle(.secondary)
                 Text("Add a watched folder, or all found files are already tagged")
                     .font(.caption).foregroundStyle(.tertiary)
+            } else if let q = store.searchQuery {
+                Image(systemName: "sparkle.magnifyingglass").font(.system(size: 40)).foregroundStyle(.tertiary)
+                switch store.searchStatus {
+                case .noPlugin:
+                    Text("No search plugin enabled").foregroundStyle(.secondary)
+                    Text("Enable Overlap CLIP Search in the Plugins menu")
+                        .font(.caption).foregroundStyle(.tertiary)
+                case .noIndex:
+                    Text("Search index not built yet").foregroundStyle(.secondary)
+                    Text(store.searchIndexing ? (store.searchProgress ?? "Indexing images for search…")
+                                              : "Plugins ▸ Rebuild Search Index")
+                        .font(.caption).foregroundStyle(.tertiary)
+                case .ok:
+                    Text("No matches for “\(q)”").foregroundStyle(.secondary)
+                    Text(store.searching ? "Searching…" : "Try different words, or lower Minimum similarity in Plugin Settings")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
             } else {
                 Image(systemName: "tag").font(.system(size: 40)).foregroundStyle(.tertiary)
                 Text("Click tags in the sidebar to filter")
@@ -755,18 +792,8 @@ struct ResultsGridView: View {
         panel.allowsMultipleSelection = false
         panel.prompt = "Export Here"
         guard panel.runModal() == .OK, let dir = panel.url else { return }
-        let fm = FileManager.default
-        for url in urls {
-            var dest = dir.appendingPathComponent(url.lastPathComponent)
-            var n = 2
-            while fm.fileExists(atPath: dest.path) {
-                let base = url.deletingPathExtension().lastPathComponent
-                let ext = url.pathExtension
-                dest = dir.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
-                n += 1
-            }
-            try? fm.copyItem(at: url, to: dest)
-        }
+        // Selection-sized, so synchronous is fine; clone = APFS copy-on-write.
+        _ = QueryExporter.materialize(urls, into: dir, mode: .clone, manifest: nil)
     }
 
     private func targetURLs(for item: FileItem) -> [URL] {

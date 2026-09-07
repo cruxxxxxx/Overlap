@@ -1,0 +1,25 @@
+{
+  "name": "Overlap CLIP Search",
+  "id": "com.overlap.clip",
+  "version": "0.1.0",
+  "protocolVersion": 1,
+  "exec": "overlap-clip",
+  "handles": ["image"],
+  "capabilities": ["search"],
+  "batch": true,
+  "wantsKnownTags": false,
+  "wantsLibrary": true,
+  "timeoutMs": 3600000,
+  "queryTimeoutMs": 60000,
+  "settings": [
+    { "key": "maxResults", "type": "number", "label": "Max results",
+      "section": "Search", "min": 50, "max": 2000, "step": 50, "default": 300,
+      "help": "How many ranked matches a search returns" },
+    { "key": "minScore", "type": "number", "label": "Minimum similarity",
+      "section": "Search", "min": 0, "max": 0.4, "step": 0.01, "default": 0.15,
+      "help": "CLIP cosine cutoff; good matches usually score 0.2–0.35" },
+    { "key": "maxFileMB", "type": "number", "label": "Max file size (MB)",
+      "section": "Indexing", "min": 5, "max": 200, "step": 5, "default": 25,
+      "help": "Files larger than this are skipped when indexing" }
+  ]
+}

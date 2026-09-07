@@ -20,14 +20,20 @@ struct QueryBar: View {
             TypeFilterMenu()
             TypeFilterChips()
             segments
+            if store.searchAvailable { SemanticSearchField() }
             Spacer()
             Text("\(store.results.count)")
                 .font(.headline).monospacedDigit()
             Text("files").foregroundStyle(.secondary)
             SortMenu()
             Slider(value: $thumbSize, in: 90...280).frame(width: 110)
+            Button { store.exportResults() } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .disabled(store.results.isEmpty)
+            .help("Export all results as a folder (⌘⇧E)")
             Button("Clear") { store.clearQuery() }
-                .disabled(isEmptyQuery)
+                .disabled(isEmptyQuery && store.searchQuery == nil)
         }
         .padding(8)
     }
@@ -320,10 +326,48 @@ struct SortMenu: View {
                 HStack { Text("Descending"); if !store.sortAscending { Image(systemName: "checkmark") } }
             }
         } label: {
-            Label(store.sortKey.rawValue,
+            // A live semantic search orders by relevance regardless of the sort key.
+            Label(store.searchQuery != nil ? "Relevance" : store.sortKey.rawValue,
                   systemImage: store.sortAscending ? "arrow.up.arrow.down" : "arrow.down.arrow.up")
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+    }
+}
+
+/// Free-text semantic search (a `capabilities: ["search"]` plugin, e.g.
+/// overlap-clip). The text stays local until Return so a keystroke never
+/// republishes the store; each query spawns the plugin process (~0.5s), which
+/// is why it's submit-driven rather than live.
+struct SemanticSearchField: View {
+    @EnvironmentObject var store: TagStore
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "sparkle.magnifyingglass").foregroundStyle(.secondary)
+            TextField("Semantic search…", text: $text)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .onSubmit { store.runSearch(text) }
+                .onExitCommand { text = ""; store.clearSearch(); focused = false }
+            if store.searching {
+                ProgressView().controlSize(.small)
+            } else if store.searchQuery != nil {
+                Button { text = ""; store.clearSearch() } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.5)))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .stroke(store.searchQuery != nil ? Color.accentColor : .clear))
+        .frame(width: 210)
+        .onChange(of: store.searchQuery) { q in if q == nil { text = "" } }
+        .onChange(of: store.searchFocusRequest) { _ in focused = true }
+        .help("Describe what you're looking for (\"girl with spiral hair\"), then press Return. ⌘F")
     }
 }

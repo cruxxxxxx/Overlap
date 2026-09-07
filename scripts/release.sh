@@ -42,14 +42,18 @@ echo "-- bundle built-in plugins --"
 # user-installed copy wins over the bundled one.
 PLUGINS_DST="$APP/Contents/PlugIns"
 mkdir -p "$PLUGINS_DST"
-for name in overlap-suggest; do
+for name in overlap-suggest overlap-clip; do
     src="plugins/$name"
     exec_name=$(/usr/bin/python3 -c "import json;print(json.load(open('$src/manifest.json'))['exec'])")
     echo "   building $name"
-    ( cd "$src" && swiftc -O main.swift -o "$exec_name" )
+    ( cd "$src" && swiftc -O *.swift -o "$exec_name" )
     mkdir -p "$PLUGINS_DST/$name"
     cp "$src/manifest.json" "$src/$exec_name" "$PLUGINS_DST/$name/"
     [ -f "$src/README.md" ] && cp "$src/README.md" "$PLUGINS_DST/$name/"
+    # Data files a plugin reads next to its executable (tokenizer vocab etc.).
+    for extra in "$src"/*.json "$src"/*.txt; do
+        [ -f "$extra" ] && [ "$(basename "$extra")" != "manifest.json" ] && cp "$extra" "$PLUGINS_DST/$name/"
+    done
 done
 
 echo "-- sign (hardened runtime) --"

@@ -12,6 +12,11 @@ private struct UndoStep {
     let redo: () -> Void
 }
 
+/// Why a search came back empty, for the empty-state copy.
+enum SearchStatus { case ok, noPlugin, noIndex }
+/// Hits kept per search — enough to scroll, few enough to resolve on demand.
+private let maxSearchHits = 300
+
 /// Central model. One live Spotlight query gathers every tagged file under the
 /// scope (with its tags) into memory; the tag tree, counts, and boolean
 /// filtering all run client-side. Every mutation records an inverse so it can
@@ -57,6 +62,32 @@ final class TagStore: ObservableObject {
     private var suggestToken = UUID()
     private var autoSuggestTask: Task<Void, Never>?
 
+    // Semantic search — `capabilities: ["search"]` plugins (overlap-clip).
+    /// The submitted query; nil = inactive, results come from the tag query.
+    @Published private(set) var searchQuery: String?
+    @Published private(set) var searching = false
+    @Published private(set) var searchStatus: SearchStatus = .ok
+    /// A search plugin is installed + enabled (cached; discovery hits disk).
+    @Published private(set) var searchAvailable = false
+    /// The search plugin is (re)building its index. Its own flag, not
+    /// `warmingUp`: CLIP indexing can run for minutes and must not freeze
+    /// suggestions; the two plugins keep separate caches.
+    @Published private(set) var searchIndexing = false
+    @Published private(set) var searchProgress: String?
+    @Published var searchFocusRequest = 0   // bump to focus the search field
+    /// Last search's hits, score-descending. nil = inactive.
+    private var searchHits: [SearchHit]?
+    /// Items for hits outside the tagged catalog (untagged files), loaded on demand.
+    private var searchExtras: [String: FileItem] = [:]
+    private var searchToken = UUID()
+    private var searchWarmupToken = UUID()
+    private var lastSearchWarmedSig = ""
+    /// A query submitted while the index was building; runs when it finishes.
+    private var pendingSearchQuery: String?
+
+    /// Query export in flight ("Exporting 120/292…"); nil when idle.
+    @Published private(set) var exportProgress: String?
+
     /// Queue-wide suggestions for the "group by suggestions" browse mode.
     /// Deliberately separate from `suggestions`: the debounced selection
     /// auto-suggest and this whole-queue run have independent lifetimes.
@@ -95,7 +126,10 @@ final class TagStore: ObservableObject {
     /// Suggestion sources the user has switched off (plugin ids). Persisted.
     @Published var disabledPluginIDs: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: "disabledPluginIDs") ?? []) {
-        didSet { UserDefaults.standard.set(Array(disabledPluginIDs), forKey: "disabledPluginIDs") }
+        didSet {
+            UserDefaults.standard.set(Array(disabledPluginIDs), forKey: "disabledPluginIDs")
+            refreshSearchAvailability()
+        }
     }
     /// Master switch for auto-suggest. Off = no plugin runs, suggestion row
     /// stays collapsed. Persisted; toggled by tapping ✨ in the tag bar.
@@ -209,12 +243,14 @@ final class TagStore: ObservableObject {
 
     func start() {
         isIndexing = true
+        refreshSearchAvailability()
         catalogQuery.predicate = NSPredicate(format: "%K LIKE %@", tagAttr, "*")
         catalogQuery.start()
     }
 
     func setScope(_ url: URL) {
         scopeURL = url
+        clearSearch(refresh: false)   // hits were paths in the old scope
         catalogQuery.stop()
         catalogQuery.searchScopes = [url]
         allItems = []
@@ -668,6 +704,7 @@ final class TagStore: ObservableObject {
     func cycle(_ tag: String) { set(tag, to: effectiveState(for: tag).next) }
 
     func clearQuery() {
+        clearSearch(refresh: false)
         let g = VennGroup()
         groups = [g]
         activeGroupID = g.id
@@ -893,10 +930,26 @@ final class TagStore: ObservableObject {
             rebuildQueueSections()   // sections track the visible queue for free
             return
         }
+        let predicate = queryPredicate()
+        if let hits = searchHits {
+            // Relevance order from the plugin, narrowed by the tag/type query
+            // when one is active. Bypasses sortItems on purpose.
+            results = rankedSearchResults(hits, predicate: predicate)
+            return
+        }
+        guard let predicate else { results = []; return }
+        results = sortItems(visibleItems.filter(predicate))
+        writeVennDump()
+    }
+
+    /// THE query as a filter closure; nil when nothing is selected (nothing
+    /// selected → nothing shown).
+    private func queryPredicate() -> ((FileItem) -> Bool)? {
         let activeGroups = groups.filter { !$0.sets.isEmpty }
         let exc = activeExcludes
+        let kindFilter = kindFilter, extFilter = extFilter
         let hasTypeFilter = !kindFilter.isEmpty || !extFilter.isEmpty
-        guard !activeGroups.isEmpty || !exc.isEmpty || hasTypeFilter else { results = []; return }
+        guard !activeGroups.isEmpty || !exc.isEmpty || hasTypeFilter else { return nil }
 
         // Split into OR-separated clauses of AND-joined diagrams.
         var clauses: [[VennGroup]] = []
@@ -915,20 +968,45 @@ final class TagStore: ObservableObject {
             }
         }
 
-        let filtered = visibleItems.filter { item in
+        return { item in
             if !clauses.isEmpty {
                 let anyClause = clauses.contains { clause in
                     clause.allSatisfy { passes(item, $0) }
                 }
                 if !anyClause { return false }
             }
-            for e in exc where hasTag(item, e) { return false }
+            for e in exc where self.hasTag(item, e) { return false }
             if !kindFilter.isEmpty && !kindFilter.contains(item.kind) { return false }
             if !extFilter.isEmpty && !extFilter.contains(item.ext) { return false }
             return true
         }
-        results = sortItems(filtered)
-        writeVennDump()
+    }
+
+    /// Each hit resolved to its catalog item (so the hidden-tag lock applies)
+    /// or to the on-demand extra for an untagged file, in score order. Untagged
+    /// extras fail any tag clause naturally; type filters still apply.
+    private func rankedSearchResults(_ hits: [SearchHit],
+                                     predicate: ((FileItem) -> Bool)?) -> [FileItem] {
+        var visible: [String: FileItem] = [:]
+        visible.reserveCapacity(visibleItems.count)
+        for it in visibleItems { visible[it.id] = it }
+        let catalog = Set(allItems.map(\.id))
+        let locked = !revealed && !hiddenTags.isEmpty
+        var out: [FileItem] = []
+        out.reserveCapacity(hits.count)
+        for h in hits {
+            let item: FileItem?
+            if catalog.contains(h.path) {
+                item = visible[h.path]
+            } else if let extra = searchExtras[h.path] {
+                item = locked && itemHidden(extra) ? nil : extra
+            } else {
+                item = nil
+            }
+            guard let item, predicate?(item) ?? true else { continue }
+            out.append(item)
+        }
+        return out
     }
 
     /// Debug hook for the headless validator (scripts/validate-venn.swift):
@@ -1064,6 +1142,9 @@ final class TagStore: ObservableObject {
         }
         for i in queueItems.indices where ids.contains(queueItems[i].id) {
             queueItems[i] = FileItem.load(queueItems[i].url)
+        }
+        for id in ids where searchExtras[id] != nil {
+            searchExtras[id] = FileItem.load(URL(fileURLWithPath: id))
         }
         recomputeCounts()
         refreshVisible()
@@ -1375,7 +1456,7 @@ final class TagStore: ObservableObject {
     func warmUpPlugins(force: Bool = false) {
         guard !warmingUp, !queueSuggesting else { return }
         let sig = corpusSignature()
-        guard force || sig != lastWarmedSig else { return }
+        guard force || sig != lastWarmedSig else { warmUpSearchIndex(); return }
         warmingUp = true
         warmupProgress = nil
         let library = taggedLibrary.map { LibraryItem(path: $0.url.path, kind: $0.kind.rawValue,
@@ -1401,8 +1482,199 @@ final class TagStore: ObservableObject {
                     self.suggestQueue()
                 }
                 self.autoSuggestSelection()
+                // Chained, not concurrent: CLIP indexing competes for the same CPU/ANE.
+                self.warmUpSearchIndex()
             }
         }
+    }
+
+    // MARK: - Semantic search
+
+    func requestSearchFocus() { searchFocusRequest &+= 1 }
+
+    private func refreshSearchAvailability() {
+        searchAvailable = !SearchEngine.searchPlugins(disabledIDs: disabledPluginIDs).isEmpty
+    }
+
+    /// Every image under the scope (any depth) and the watched folders (queue
+    /// depth), tagged or not — the semantic-search corpus. Off-main. Returns a
+    /// cheap signature too, so an unchanged corpus isn't re-sent.
+    nonisolated private static func searchCorpus(scope: URL, queueFolders: [URL], queueDepth: Int,
+                                                 tagsByPath: [String: [String]])
+        -> (items: [LibraryItem], sig: String) {
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
+        var kindByExt: [String: FileKind] = [:]
+        var seen = Set<String>()
+        var items: [LibraryItem] = []
+        var h: UInt64 = 14695981039346656037
+        let roots = [(scope, Int.max)] + queueFolders.map { ($0, queueDepth) }
+        for (root, depth) in roots {
+            for url in intakeURLs(in: root, fm: fm, maxDepth: depth, prefetchKeys: keys) {
+                let ext = url.pathExtension.lowercased()
+                guard !ext.isEmpty else { continue }
+                let kind: FileKind
+                if let k = kindByExt[ext] { kind = k } else {
+                    kind = FileKind.of(contentType: nil, ext: ext); kindByExt[ext] = kind
+                }
+                guard kind == .image else { continue }
+                let path = canon(url.path).path
+                guard seen.insert(path).inserted else { continue }
+                let vals = try? url.resourceValues(forKeys: Set(keys))
+                guard vals?.isRegularFile != false else { continue }
+                let mod = vals?.contentModificationDate
+                items.append(LibraryItem(path: path, kind: kind.rawValue,
+                                         tags: tagsByPath[path] ?? [], modDate: mod))
+                h = (h ^ UInt64(bitPattern: Int64(path.hashValue))) &* 1099511628211
+                h = (h ^ (mod?.timeIntervalSince1970 ?? 0).bitPattern) &* 1099511628211
+            }
+        }
+        h = (h ^ UInt64(items.count)) &* 1099511628211
+        return (items, String(h))
+    }
+
+    /// Build/refresh the search plugin's index over the whole corpus. Runs after
+    /// the suggest warm-up, on scope/watched-folder changes, and from the
+    /// Plugins menu (`force`). Skips when the corpus hasn't changed.
+    func warmUpSearchIndex(force: Bool = false) {
+        refreshSearchAvailability()
+        guard searchAvailable, !searchIndexing, !searching else { return }
+        let scope = scopeURL, folders = queueFolders, depth = queueDepth
+        var tagsByPath: [String: [String]] = [:]
+        for it in allItems where !it.tags.isEmpty { tagsByPath[it.id] = it.tags }
+        let disabled = disabledPluginIDs, settings = pluginSettings
+        let lastSig = lastSearchWarmedSig
+        let token = UUID()
+        searchWarmupToken = token
+        Task.detached(priority: .utility) { [weak self] in
+            let corpus = Self.searchCorpus(scope: scope, queueFolders: folders,
+                                           queueDepth: depth, tagsByPath: tagsByPath)
+            guard force || corpus.sig != lastSig else { return }
+            let proceed = await MainActor.run { () -> Bool in
+                guard let self, self.searchWarmupToken == token, !self.searchIndexing else { return false }
+                self.searchIndexing = true
+                self.searchProgress = nil
+                return true
+            }
+            guard proceed else { return }
+            _ = await SearchEngine.run(query: nil, library: corpus.items, disabledIDs: disabled,
+                                       pluginSettings: settings, onProgress: { line in
+                Task { @MainActor in self?.searchProgress = line }
+            })
+            await MainActor.run {
+                guard let self else { return }
+                self.searchIndexing = false
+                self.searchProgress = nil
+                self.lastSearchWarmedSig = corpus.sig
+                if let q = self.pendingSearchQuery {
+                    self.pendingSearchQuery = nil
+                    self.searching = false
+                    self.runSearch(q)
+                }
+            }
+        }
+    }
+
+    /// Submit a free-text query. Hits resolve to catalog items where possible
+    /// and to on-demand extras for untagged files; `refreshResults` then shows
+    /// them in relevance order (narrowed by the tag query if one is active).
+    func runSearch(_ raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { clearSearch(); return }
+        searchQuery = text
+        searching = true
+        if searchIndexing { pendingSearchQuery = text; return }   // runs when it finishes
+        let token = UUID()
+        searchToken = token
+        let known = Set(allItems.map(\.id))
+        let disabled = disabledPluginIDs, settings = pluginSettings
+        let extras = searchExtras
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let outcome = await SearchEngine.run(query: text, library: [], disabledIDs: disabled,
+                                                 pluginSettings: settings)
+            let hits = Array(outcome.hits.prefix(maxSearchHits))
+            let hitPaths = Set(hits.map(\.path))
+            var loaded = extras.filter { hitPaths.contains($0.key) }
+            let fm = FileManager.default
+            for h in hits where !known.contains(h.path) && loaded[h.path] == nil
+                && fm.fileExists(atPath: h.path) {
+                loaded[h.path] = FileItem.load(URL(fileURLWithPath: h.path))
+            }
+            let status: SearchStatus = !outcome.ranPlugin ? .noPlugin
+                : ((outcome.indexedCount ?? 0) == 0 ? .noIndex : .ok)
+            await MainActor.run {
+                guard let self, self.searchToken == token else { return }
+                self.searchHits = hits
+                self.searchExtras = loaded
+                self.searchStatus = status
+                self.searching = false
+                self.refreshResults()
+            }
+        }
+    }
+
+    // MARK: - Query export (results → a real Finder folder)
+
+    /// Human-readable summary of THE query + search + type filter, e.g.
+    /// `“girl with spiral hair” fashion + hair −by png`. Doubles as the
+    /// suggested export folder name.
+    var queryDescription: String {
+        var parts: [String] = []
+        if let q = searchQuery { parts.append("“\(q)”") }
+        var clause = ""
+        for g in groups where !g.sets.isEmpty {
+            let joiner = g.regions.isEmpty && g.mode == .any ? " or " : " + "
+            let text = g.sets.joined(separator: joiner)
+            if clause.isEmpty { clause = text }
+            else { clause += (g.op == .or ? " or " : " and ") + text }
+        }
+        if !clause.isEmpty { parts.append(clause) }
+        parts.append(contentsOf: activeExcludes.map { "−\($0)" })
+        if !kindFilter.isEmpty { parts.append(kindFilter.map(\.rawValue).sorted().joined(separator: ",")) }
+        if !extFilter.isEmpty { parts.append(extFilter.sorted().joined(separator: ",")) }
+        return parts.isEmpty ? "All results" : parts.joined(separator: " ")
+    }
+
+    /// Export every current result (not just the selection) into a new folder
+    /// the user picks: clone (default) or hard link per file, plus an
+    /// `.overlap-query.json` manifest. Folders in the results are skipped.
+    func exportResults() {
+        guard exportProgress == nil else { return }
+        let items = results.filter { $0.kind != .folder }
+        guard !items.isEmpty else { return }
+        let description = queryDescription
+        guard let choice = QueryExporter.askDestination(
+            suggestedName: QueryExporter.folderName(for: description), count: items.count) else { return }
+        let manifest = QueryExportManifest(
+            created: Date(), scope: scopeURL.path, query: description,
+            groups: groups.filter { !$0.sets.isEmpty }, excludes: activeExcludes,
+            kinds: kindFilter.map(\.rawValue).sorted(), exts: extFilter.sorted(),
+            searchQuery: searchQuery, mode: choice.mode.rawValue, count: items.count)
+        let urls = items.map(\.url)
+        exportProgress = "Exporting 0/\(urls.count)…"
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let outcome = QueryExporter.materialize(urls, into: choice.folder, mode: choice.mode,
+                                                    manifest: manifest) { done, total in
+                if done % 20 == 0 || done == total {
+                    Task { @MainActor in self?.exportProgress = "Exporting \(done)/\(total)…" }
+                }
+            }
+            await MainActor.run {
+                self?.exportProgress = nil
+                QueryExporter.finish(outcome, folder: choice.folder, mode: choice.mode)
+            }
+        }
+    }
+
+    func clearSearch(refresh: Bool = true) {
+        searchToken = UUID()
+        pendingSearchQuery = nil
+        searchQuery = nil
+        searchHits = nil
+        searchExtras = [:]
+        searching = false
+        searchStatus = .ok
+        if refresh { refreshResults() }
     }
 
     /// Pick the single plugin that drives grouping (nil = grouping off). Changing
@@ -1542,6 +1814,10 @@ final class TagStore: ObservableObject {
         let map = Dictionary(uniqueKeysWithValues: moves.map { ($0.from.path, $0.to) })
         for i in allItems.indices { if let to = map[allItems[i].id] { allItems[i] = FileItem.load(to) } }
         for i in queueItems.indices { if let to = map[queueItems[i].id] { queueItems[i] = FileItem.load(to) } }
+        for m in moves where searchExtras.removeValue(forKey: m.from.path) != nil {
+            searchExtras[m.to.path] = FileItem.load(m.to)
+        }
+        searchHits = searchHits?.map { h in map[h.path].map { SearchHit(path: $0.path, score: h.score) } ?? h }
         var newSel = selection
         for m in moves where newSel.remove(m.from.path) != nil { newSel.insert(m.to.path) }
         selection = newSel
@@ -1573,6 +1849,7 @@ final class TagStore: ObservableObject {
         }
         allItems.removeAll { ids.contains($0.id) }
         queueItems.removeAll { ids.contains($0.id) }
+        for id in ids { searchExtras.removeValue(forKey: id) }
         selection.subtract(ids)
         recomputeCounts()
         refreshVisible()
@@ -1596,6 +1873,10 @@ final class TagStore: ObservableObject {
                !allItems.contains(where: { $0.id == item.id }) {
                 allItems.append(item)
             }
+            // A restored search hit outside the catalog comes back as an extra.
+            if searchHits?.contains(where: { $0.path == item.id }) == true {
+                searchExtras[item.id] = item
+            }
             if item.tags.isEmpty,
                queueFolders.contains(where: { url.path.hasPrefix($0.path) }),
                !queueItems.contains(where: { $0.id == item.id }) {
@@ -1609,7 +1890,27 @@ final class TagStore: ObservableObject {
     // MARK: - Selection movement
 
     func selectedURLs() -> [URL] {
-        results.filter { selection.contains($0.id) }.map { $0.url }
+        selectedItems().map { $0.url }
+    }
+
+    /// Selected items resolved against everything on screen — the flat `results`
+    /// AND the grouped `queueSections`, whose cached `items` can outlive a
+    /// `results` refresh (a file tagged this session is still shown in its
+    /// section). Filtering `results` alone dropped those, so clicking such a
+    /// tile and tagging it silently no-op'd. Deduped by id (a file could sit in
+    /// both), preserving `results` order first.
+    func selectedItems() -> [FileItem] {
+        var seen = Set<String>()
+        var out: [FileItem] = []
+        for it in results where selection.contains(it.id) && seen.insert(it.id).inserted {
+            out.append(it)
+        }
+        for sec in queueSections {
+            for it in sec.items where selection.contains(it.id) && seen.insert(it.id).inserted {
+                out.append(it)
+            }
+        }
+        return out
     }
 
     func moveSelection(dx: Int, dy: Int) {
@@ -1629,7 +1930,8 @@ final class TagStore: ObservableObject {
         mode = m
         selection = []
         // The query persists across Tags/Queue/Explore — same model everywhere.
-        if m == .queue { scanQueue() } else { refreshResults() }
+        // Search doesn't: the queue has its own bar and no search field.
+        if m == .queue { clearSearch(refresh: false); scanQueue() } else { refreshResults() }
     }
 
     /// Everything visible enters the queue — files of any kind AND folders. The
@@ -1681,13 +1983,17 @@ final class TagStore: ObservableObject {
     /// URLs under `folder` down to `maxDepth` subfolder levels (1 = immediate
     /// contents only). A directory sitting AT the limit has its descendants
     /// skipped, so the walk never goes deeper than requested.
-    nonisolated static func intakeURLs(in folder: URL, fm: FileManager, maxDepth: Int) -> [URL] {
+    /// `prefetchKeys` are bulk-fetched by the enumerator so a later
+    /// `resourceValues` read for them is a cache hit, not a stat per file.
+    nonisolated static func intakeURLs(in folder: URL, fm: FileManager, maxDepth: Int,
+                                       prefetchKeys: [URLResourceKey] = []) -> [URL] {
         if maxDepth <= 1 {
             return (try? fm.contentsOfDirectory(
-                at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+                at: folder, includingPropertiesForKeys: prefetchKeys.isEmpty ? nil : prefetchKeys,
+                options: [.skipsHiddenFiles])) ?? []
         }
         var acc: [URL] = []
-        let en = fm.enumerator(at: folder, includingPropertiesForKeys: [.isDirectoryKey],
+        let en = fm.enumerator(at: folder, includingPropertiesForKeys: [.isDirectoryKey] + prefetchKeys,
                                options: [.skipsHiddenFiles, .skipsPackageDescendants])
         while let url = en?.nextObject() as? URL {
             acc.append(url)
@@ -1717,6 +2023,7 @@ final class TagStore: ObservableObject {
         guard depth < queueDrill.count else { return }
         queueDrill = Array(queueDrill.prefix(max(0, depth)))
         scanQueue()
+        warmUpSearchIndex()
     }
 
     var taggedQueueCount: Int { queueItems.filter { !$0.tags.isEmpty }.count }
@@ -1724,10 +2031,12 @@ final class TagStore: ObservableObject {
     func addQueueFolder(_ url: URL) {
         guard !queueFolders.contains(url) else { return }
         queueFolders.append(url); saveQueueFolders(); scanQueue()
+        warmUpSearchIndex()   // watched folders are part of the search corpus
     }
 
     func removeQueueFolder(_ url: URL) {
         queueFolders.removeAll { $0 == url }; saveQueueFolders(); scanQueue()
+        warmUpSearchIndex()
     }
 
     // MARK: - Apply queue (registers undo)

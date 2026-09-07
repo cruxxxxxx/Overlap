@@ -17,6 +17,7 @@ struct SuggestRequest: Codable {
     var knownTags: [String]?          // sent only when manifest.wantsKnownTags
     var library: [LibraryItem]?       // sent only when manifest.wantsLibrary
     var settings: [String: SettingValue]?  // merged values for manifest.settings keys
+    var query: String? = nil          // search plugins only: free-text query; nil = index warm-up
 }
 
 // MARK: - Plugin-declared settings (rendered by the host's Plugin Settings UI)
@@ -91,9 +92,21 @@ struct LibraryItem: Codable {
 
 // MARK: - Response (plugin stdout → host)
 
+/// Every field past `protocolVersion` is optional on purpose: synthesized
+/// Decodable ignores default values, so a search plugin answering only `hits`
+/// (or a suggest plugin that has never heard of `hits`) must still decode.
 struct SuggestResponse: Codable {
     let protocolVersion: Int?
-    let suggestions: [RawSuggestion]
+    let suggestions: [RawSuggestion]?
+    var hits: [SearchHit]? = nil      // search plugins: ranked matches for `query`
+    var indexedCount: Int? = nil      // search plugins: images in the persisted index
+}
+
+/// One ranked search match. `score` is plugin-defined (CLIP cosine for
+/// overlap-clip); the host only orders by it.
+struct SearchHit: Codable, Hashable {
+    let path: String
+    let score: Double
 }
 
 struct RawSuggestion: Codable {
@@ -130,6 +143,9 @@ struct PluginManifest: Codable {
     var wantsLibrary = false          // receive the full tagged corpus
     var timeoutMs = 5000
     var settings: [PluginSetting]? = nil   // tunables the host renders + injects
+    // Optional (not defaulted) so every existing manifest keeps decoding.
+    var capabilities: [String]? = nil      // "suggest" (default) and/or "search"
+    var queryTimeoutMs: Int? = nil         // search plugins: per-query budget (index uses timeoutMs)
 }
 
 /// A manifest paired with its resolved on-disk location.
@@ -142,6 +158,10 @@ struct DiscoveredPlugin: Identifiable {
     func handles(_ kind: FileKind) -> Bool {
         manifest.handles.contains("*") || manifest.handles.contains(kind.rawValue)
     }
+
+    /// Declared capabilities; a manifest without the key is a classic suggester.
+    var capabilities: [String] { manifest.capabilities ?? ["suggest"] }
+    func supports(_ capability: String) -> Bool { capabilities.contains(capability) }
 }
 
 // MARK: - Shared JSON coders (ISO-8601 dates so any language can parse)

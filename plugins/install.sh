@@ -12,11 +12,12 @@ for dir in "$HERE"/*/; do
     name="$(basename "$dir")"
     [ -f "$dir/manifest.json" ] || continue
 
-    # Compile main.swift → an executable named by the manifest's "exec".
+    # Compile every .swift in the dir (main.swift + helpers) → an executable
+    # named by the manifest's "exec".
     if [ -f "$dir/main.swift" ]; then
         exec_name="$(/usr/bin/python3 -c "import json,sys;print(json.load(open('$dir/manifest.json'))['exec'])")"
         echo "building $name → $exec_name"
-        ( cd "$dir" && swiftc main.swift -o "$exec_name" )
+        ( cd "$dir" && swiftc *.swift -o "$exec_name" )
     fi
 
     ln -sfn "$dir" "$DEST/$name"

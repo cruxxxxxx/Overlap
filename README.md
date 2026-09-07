@@ -39,6 +39,7 @@ Overlap reads and writes real macOS tags (`com.apple.metadata:_kMDItemUserTags`)
 - **Fast tagging** — quick-tag bar (`T`, type-ahead), drag-onto-tag, click-to-apply; create / rename / **merge** / delete tags.
 - **Queue** — watch folders for untagged files, tag them, then **Apply** to move them into your library. Configurable depth and **Finder-style drill-in**.
 - **Tag suggestions** — content-based suggestions from a plugin extension point (see [Plugins](#plugins)).
+- **Semantic search** — type "girl with spiral hair" and get ranked matches from every image in your scope and watched folders, tagged or not. Powered by the bundled MobileCLIP plugin; it downloads ~200 MB of Apple's Core ML models the first time it runs, then everything stays on-device.
 - **Hidden tags** — passcode-gate sensitive tags; per-tag default include/exclude.
 - **Undo/redo** across every mutation (⌘Z / ⌘⇧Z), plus Stats, Fix Extension, Reveal, Export, and drag-out to other apps.
 

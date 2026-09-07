@@ -16,8 +16,10 @@ enum SuggestionEngine {
                                 disabledIDs: Set<String> = [],
                                 pluginSettings: [String: [String: SettingValue]] = [:],
                                 onProgress: (@Sendable (String) -> Void)? = nil) async -> [TagSuggestion] {
+        // Search-only plugins (overlap-clip) never see suggest traffic: they'd
+        // load a Core ML model on every selection click for nothing.
         let plugins = PluginRegistry.discover().filter { p in
-            !disabledIDs.contains(p.id) && kinds.contains(where: p.handles)
+            !disabledIDs.contains(p.id) && p.supports("suggest") && kinds.contains(where: p.handles)
         }
         guard !plugins.isEmpty else { return [] }
         let raws = await withTaskGroup(of: [RawSuggestion].self) { group -> [RawSuggestion] in
@@ -45,7 +47,26 @@ enum SuggestionEngine {
     nonisolated private static func invoke(_ plugin: DiscoveredPlugin,
                                            request: SuggestRequest,
                                            onProgress: (@Sendable (String) -> Void)? = nil) -> [RawSuggestion] {
-        guard let payload = try? PluginCoder.encoder.encode(request) else { return [] }
+        guard let resp = runProcess(plugin, request: request,
+                                    timeoutMs: plugin.manifest.timeoutMs,
+                                    onProgress: onProgress) else { return [] }
+        let valid = Set(request.files.map(\.path))
+        return (resp.suggestions ?? [])
+            .filter { valid.contains($0.path) && !$0.tag.isEmpty }
+            .map { RawSuggestion(path: $0.path, tag: $0.tag,
+                                 confidence: min(max($0.confidence, 0), 1),
+                                 source: plugin.manifest.name, group: $0.group) }
+    }
+
+    /// The plugin process lifecycle shared by suggest and search: request on
+    /// stdin, stderr lines streamed as progress, stdout decoded as a response,
+    /// SIGTERM→SIGKILL past `timeoutMs`. Returns nil on any failure; callers
+    /// apply their own semantics (path validation, ranking) to the response.
+    nonisolated static func runProcess(_ plugin: DiscoveredPlugin,
+                                       request: SuggestRequest,
+                                       timeoutMs: Int,
+                                       onProgress: (@Sendable (String) -> Void)? = nil) -> SuggestResponse? {
+        guard let payload = try? PluginCoder.encoder.encode(request) else { return nil }
 
         let proc = Process()
         proc.executableURL = plugin.execURL
@@ -80,7 +101,7 @@ enum SuggestionEngine {
         do { try proc.run() } catch {
             errReader.readabilityHandler = nil
             NSLog("[plugins] \(plugin.id): failed to launch — \(error.localizedDescription)")
-            return []
+            return nil
         }
 
         // Feed stdin then close so the child sees EOF.
@@ -96,31 +117,26 @@ enum SuggestionEngine {
             readGroup.leave()
         }
 
-        let deadline = DispatchTime.now() + .milliseconds(plugin.manifest.timeoutMs)
+        let deadline = DispatchTime.now() + .milliseconds(timeoutMs)
         if readGroup.wait(timeout: deadline) == .timedOut {
             proc.terminate()                            // SIGTERM
             usleep(50_000)
             if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
             errReader.readabilityHandler = nil
-            NSLog("[plugins] \(plugin.id): timed out after \(plugin.manifest.timeoutMs)ms — killed")
-            return []
+            NSLog("[plugins] \(plugin.id): timed out after \(timeoutMs)ms — killed")
+            return nil
         }
         proc.waitUntilExit()
         errReader.readabilityHandler = nil
         guard proc.terminationStatus == 0 else {
             NSLog("[plugins] \(plugin.id): exited \(proc.terminationStatus)")
-            return []
+            return nil
         }
         guard let resp = try? PluginCoder.decoder.decode(SuggestResponse.self, from: outData) else {
             NSLog("[plugins] \(plugin.id): stdout is not a valid SuggestResponse")
-            return []
+            return nil
         }
-        let valid = Set(request.files.map(\.path))
-        return resp.suggestions
-            .filter { valid.contains($0.path) && !$0.tag.isEmpty }
-            .map { RawSuggestion(path: $0.path, tag: $0.tag,
-                                 confidence: min(max($0.confidence, 0), 1),
-                                 source: plugin.manifest.name, group: $0.group) }
+        return resp
     }
 
     // MARK: - Merge / rank

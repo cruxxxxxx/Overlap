@@ -17,6 +17,11 @@ struct OverlapApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(after: .saveItem) {
+                Button("Export Results as Folder…") { store.exportResults() }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                    .disabled(store.results.isEmpty || store.exportProgress != nil)
+            }
             CommandGroup(replacing: .help) {
                 Button("Overlap Tutorial") {
                     NotificationCenter.default.post(name: .overlapStartTutorial, object: nil)
@@ -45,6 +50,10 @@ struct OverlapApp: App {
                     store.warmUpPlugins(force: true)
                 }
                 .disabled(store.warmingUp)
+                Button(store.searchIndexing ? "Indexing Search…" : "Rebuild Search Index") {
+                    store.warmUpSearchIndex(force: true)
+                }
+                .disabled(store.searchIndexing || !store.searchAvailable)
                 Divider()
                 Button("Open Plugins Folder") {
                     if let dir = PluginRegistry.userPluginsDir() {
