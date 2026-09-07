@@ -4,7 +4,7 @@
 
 # Overlap
 
-**Tag and query any file with native macOS Finder tags — boolean/Venn queries, batch workflows, and content-based suggestions.**
+**Tag and query any file with native macOS Finder tags — boolean/Venn queries, on-device semantic search, batch workflows, and content-based suggestions.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 &nbsp;![macOS 13+](https://img.shields.io/badge/macOS-13%2B-black)
@@ -39,9 +39,14 @@ Overlap reads and writes real macOS tags (`com.apple.metadata:_kMDItemUserTags`)
 - **Fast tagging** — quick-tag bar (`T`, type-ahead), drag-onto-tag, click-to-apply; create / rename / **merge** / delete tags.
 - **Queue** — watch folders for untagged files, tag them, then **Apply** to move them into your library. Configurable depth and **Finder-style drill-in**.
 - **Tag suggestions** — content-based suggestions from a plugin extension point (see [Plugins](#plugins)).
-- **Semantic search** — type "girl with spiral hair" and get ranked matches from every image in your scope and watched folders, tagged or not. Powered by the bundled MobileCLIP plugin; it downloads ~200 MB of Apple's Core ML models the first time it runs, then everything stays on-device.
+- **Semantic search** — press ⌘F, type "girl with spiral hair", hit ⏎ and get ranked matches from every image in your scope and watched folders, tagged or not. Combine it with the tag query to narrow by relevance. Powered by the bundled MobileCLIP plugin; it downloads ~200 MB of Apple's Core ML models the first time it runs, then everything stays on-device.
+- **Export results as a folder** (⌘⇧E) — turn any query (tags, search, or both) into a real Finder folder for upload dialogs and other apps. Files are APFS copy-on-write clones by default (instant, no extra disk until edited) or hard links; a `.overlap-query.json` manifest records the query that produced it.
 - **Hidden tags** — passcode-gate sensitive tags; per-tag default include/exclude.
 - **Undo/redo** across every mutation (⌘Z / ⌘⇧Z), plus Stats, Fix Extension, Reveal, Export, and drag-out to other apps.
+
+## Install
+
+Download the notarized build from the **[latest release](https://github.com/cruxxxxxx/Overlap/releases/latest)**, unzip, and launch. macOS 13+.
 
 ## Build
 
@@ -61,6 +66,8 @@ Overlap runs unsandboxed so it can read and write Finder tags across your folder
 2. Filter by clicking sidebar tags (cycle include → exclude → off), or paint Venn regions in **Explore**. Narrow by file **Type** as needed.
 3. Select files, press **T**, type a tag, ⏎ — tags are written to the files, so Finder and Spotlight see them immediately.
 4. **Queue**: add watched folders, set the subfolder depth, tag the untagged items, then **Apply** to move them into your library.
+5. **Search**: ⌘F, describe what you're looking for, ⏎. The first run downloads the models and indexes your images in the background (progress shows above the grid); later launches only index what changed. Escape clears the search.
+6. **Export**: with results on screen, ⌘⇧E creates a folder holding all of them — handy when a web form wants "choose a folder" and your query isn't one.
 
 > Tags live on the files. Deleting a tag in Overlap removes it everywhere — Finder, Spotlight, other tools.
 
@@ -73,7 +80,10 @@ Overlap runs unsandboxed so it can read and write Finder tags across your folder
 
 ## Plugins
 
-Tag suggestions come from an **out-of-process plugin system** — standalone executables, in any language, discovered at runtime. Overlap pipes a JSON request to a plugin's stdin and reads suggestions from stdout, so suggestion logic (e.g. a future Apple Vision + clustering engine) ships separately from the app.
+Tag suggestions and semantic search come from an **out-of-process plugin system** — standalone executables, in any language, discovered at runtime. Overlap pipes a JSON request to a plugin's stdin and reads suggestions (or ranked search hits) from stdout, so model logic ships separately from the app. Two plugins are bundled:
+
+- **overlap-suggest** — Apple Vision: visual similarity, face identities, scene labels, OCR, fused with your own tag co-occurrence.
+- **overlap-clip** — MobileCLIP-S2 text→image search over every image in scope (`capabilities: ["search"]`).
 
 → **[How to write a plugin](docs/PLUGINS.md).**
 
