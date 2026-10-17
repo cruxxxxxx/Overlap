@@ -75,6 +75,9 @@ fi
 
 command -v xcodegen >/dev/null || fail "xcodegen not installed"
 gh auth status >/dev/null 2>&1 || fail "gh is not logged in (run: gh auth login)"
+repo="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+[ "$(gh api "repos/$repo" -q .permissions.push 2>/dev/null)" = "true" ] ||
+    fail "active gh account '$(gh api user -q .login)' can't publish releases on $repo (switch with: gh auth switch)"
 
 git fetch --quiet origin --tags
 if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
