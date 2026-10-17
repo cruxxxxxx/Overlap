@@ -16,7 +16,7 @@ struct QueryBar: View {
     var body: some View {
         HStack(spacing: 10) {
             matchMenu
-            SavedQueryMenu(canSave: !isEmptyQuery)
+            SavedQueryMenu(canSave: !isEmptyQuery || store.searchQuery != nil)
             TypeFilterMenu()
             TypeFilterChips()
             segments
@@ -32,6 +32,8 @@ struct QueryBar: View {
             }
             .disabled(store.results.isEmpty)
             .help("Export all results as a folder (⌘⇧E)")
+            NewBoardButton()
+                .labelStyle(.iconOnly)
             Button("Clear") { store.clearQuery() }
                 .disabled(isEmptyQuery && store.searchQuery == nil)
         }
@@ -174,44 +176,74 @@ struct QueryBar: View {
     }
 }
 
-/// Saved-query menu: apply a stored Venn setup, save the current one, or delete.
+/// Saved-query menu: apply a stored query, save the current one, or delete.
+/// The same list sits in the sidebar's Saved section.
 struct SavedQueryMenu: View {
     @EnvironmentObject var store: TagStore
     var canSave: Bool
     @State private var showSave = false
-    @State private var name = ""
 
     var body: some View {
         Menu {
-            if store.savedQueries.isEmpty {
+            let queries = store.visibleSavedQueries
+            if queries.isEmpty {
                 Text("No saved queries")
             } else {
-                ForEach(store.savedQueries) { q in
+                ForEach(queries) { q in
                     Button(q.name) { store.applySavedQuery(q.id) }
                 }
                 Divider()
                 Menu {
-                    ForEach(store.savedQueries) { q in
+                    ForEach(queries) { q in
                         Button(q.name, role: .destructive) { store.deleteSavedQuery(q.id) }
                     }
                 } label: { Label("Delete", systemImage: "trash") }
             }
             Divider()
-            Button("Save Current Query…") { name = ""; showSave = true }
+            Button("Save Current Query…") { showSave = true }
                 .disabled(!canSave)
         } label: {
             Label("Saved", systemImage: "bookmark")
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Save and reuse Venn queries")
-        .alert("Save Query", isPresented: $showSave) {
-            TextField("Name", text: $name)
-            Button("Save") { store.saveCurrentQuery(name: name) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Name this query to reuse it later.")
-        }
+        .help("Save and reuse queries")
+        .saveQueryAlert(isPresented: $showSave)
+    }
+}
+
+/// "Save Query" name prompt. Offers a second button that also keeps the type
+/// filter when one is active.
+struct SaveQueryAlert: ViewModifier {
+    @EnvironmentObject var store: TagStore
+    @Binding var isPresented: Bool
+    @State private var name = ""
+
+    func body(content: Content) -> some View {
+        content
+            .alert("Save Query", isPresented: $isPresented) {
+                TextField("Name", text: $name)
+                Button("Save") { store.saveCurrentQuery(name: name) }
+                if store.hasTypeFilter {
+                    Button("Save with Type Filter") {
+                        store.saveCurrentQuery(name: name, includeTypes: true)
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Name this query to reuse it later. Saving over an existing name updates it.")
+            }
+            .onChange(of: isPresented) { shown in
+                if shown {
+                    name = ""
+                }
+            }
+    }
+}
+
+extension View {
+    func saveQueryAlert(isPresented: Binding<Bool>) -> some View {
+        modifier(SaveQueryAlert(isPresented: isPresented))
     }
 }
 

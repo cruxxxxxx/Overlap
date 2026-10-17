@@ -47,12 +47,12 @@ struct SidebarView: View {
                         Text("Select files, then click a tag to apply")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
-                    ForEach(orderedTree) { top in
-                        topNode(top)
-                    }
-                    .onMove { offsets, dest in
-                        guard search.isEmpty else { return }
-                        store.reorderTopTags(orderedTree.map(\.name), from: offsets, to: dest)
+                    if store.mode == .tags && search.isEmpty {
+                        SavedQueriesSection()
+                        BoardsSection()
+                        Section("Tags") { tagRows }
+                    } else {
+                        tagRows
                     }
                 }
                 .listStyle(.sidebar)
@@ -76,6 +76,16 @@ struct SidebarView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .tvMergeTag)) { note in
             if let n = note.object as? TagNode { mergeFilter = ""; mergingNode = n }
+        }
+    }
+
+    private var tagRows: some View {
+        ForEach(orderedTree) { top in
+            topNode(top)
+        }
+        .onMove { offsets, dest in
+            guard search.isEmpty else { return }
+            store.reorderTopTags(orderedTree.map(\.name), from: offsets, to: dest)
         }
     }
 

@@ -46,13 +46,21 @@ struct VennGroup: Identifiable, Equatable, Codable {
 }
 
 /// A named snapshot of a full query — its diagrams (sets + painted regions +
-/// mode + join op) plus global excludes — so a Venn setup can be reused without
-/// rebuilding it. Type filters are session-only and intentionally not saved.
+/// mode + join op), global excludes, and the semantic search text — so a setup
+/// can be reused without rebuilding it. Type filters are saved only on request
+/// (`kinds`/`exts` nil = leave the live type filter alone when applied).
+/// The optional fields decode from queries saved before they existed.
 struct SavedQuery: Identifiable, Codable {
     var id: UUID = UUID()
     var name: String
     var groups: [VennGroup]
     var excludes: [String]
+    var searchQuery: String?
+    var kinds: [String]?
+    var exts: [String]?
+
+    /// Every tag the query names, for the hidden-tag privacy split.
+    var allTags: [String] { groups.flatMap(\.sets) + excludes }
 }
 
 /// A Venn set's effective role across a diagram's painted regions:

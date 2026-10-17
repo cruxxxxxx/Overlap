@@ -445,12 +445,13 @@ func syncIndex(items: [(path: String, modDate: Date?, tags: [String])],
     }
     let todo = items.filter { needsWork(meta.images[$0.path], signature(path: $0.path, modDate: $0.modDate)) }
     var done = 0
+    var tagsChanged = false
 
     for it in items {
         let sig = signature(path: it.path, modDate: it.modDate)
         let existing = meta.images[it.path]
         if let e = existing, e.sig == sig, !needsWork(e, sig) {
-            if e.tags != it.tags { meta.images[it.path]?.tags = it.tags }
+            if e.tags != it.tags { meta.images[it.path]?.tags = it.tags; tagsChanged = true }
             continue
         }
         let sigChanged = existing == nil || existing!.sig != sig
@@ -577,7 +578,9 @@ func syncIndex(items: [(path: String, modDate: Date?, tags: [String])],
         done += 1
         if done % 10 == 0 { saveMeta(); progress(done, todo.count) }
     }
-    if done > 0 { saveMeta() }
+    // Tag-only edits (rename, merge, delete) must persist too: later runs send
+    // no library and read the taxonomy back from meta.json.
+    if done > 0 || tagsChanged { saveMeta() }
 }
 
 // MARK: - Cluster naming (learned from the user's tags)
@@ -627,8 +630,48 @@ var tagsByPath: [String: Set<String>] = [:]
 for it in (req.library ?? []) { modByPath[it.path] = it.modDate; tagsByPath[it.path, default: []].formUnion(it.tags) }
 for f in req.files { modByPath[f.path] = f.modDate; tagsByPath[f.path, default: []].formUnion(f.tags) }
 let need = tagsByPath.map { (path: $0.key, modDate: modByPath[$0.key] ?? nil, tags: Array($0.value)) }
+
+// Forget files that left the corpus AND the disk (deleted, or moved into the
+// host's encrypted vault) so their paths, tags and OCR text don't linger in
+// meta.json. Only on a full library sync — a targets-only run knows too little.
+if req.library?.isEmpty == false {
+    var deadFP: [Int] = [], deadFaces: [Int] = []
+    var untagged = false
+    for path in meta.images.keys where tagsByPath[path] == nil {
+        if FileManager.default.fileExists(atPath: path) {
+            // Still on disk but out of the tagged library: its last tag was
+            // removed (or deleted/hidden). Keep the embeddings, drop the stale
+            // tags so they stop voting for tags that no longer exist.
+            if meta.images[path]?.tags.isEmpty == false { meta.images[path]?.tags = []; untagged = true }
+            continue
+        }
+        guard let rec = meta.images.removeValue(forKey: path) else { continue }
+        if let row = rec.fpRow { deadFP.append(row) }
+        deadFaces += (rec.faces ?? []).map(\.row)
+    }
+    if !deadFP.isEmpty || !deadFaces.isEmpty {
+        zeroRows(deadFP, rowBytes: meta.fpDim * 4, in: fpBinURL)
+        zeroRows(deadFaces, rowBytes: meta.faceDim * 4, in: faceBinURL)
+    }
+    if untagged || !deadFP.isEmpty || !deadFaces.isEmpty { saveMeta() }
+}
+
 syncIndex(items: need) { done, total in
     stderrLine("Indexing… \(done)/\(total) new")
+}
+
+/// Overwrite rows of a flat Float32 blob with zeros, in place. A dead row is
+/// still an embedding of its image; forgetting the path alone isn't enough.
+func zeroRows(_ rows: [Int], rowBytes: Int, in url: URL) {
+    guard !rows.isEmpty, rowBytes > 0, let fh = try? FileHandle(forUpdating: url) else { return }
+    defer { try? fh.close() }
+    let size = (try? fh.seekToEnd()) ?? 0
+    let zeros = Data(count: rowBytes)
+    for row in rows where row >= 0 && UInt64((row + 1) * rowBytes) <= size {
+        try? fh.seek(toOffset: UInt64(row * rowBytes))
+        fh.write(zeros)
+    }
+    try? fh.synchronize()
 }
 
 // ---- Query: channel A (kNN over FeaturePrint) + channel B (persons), noisy-OR.

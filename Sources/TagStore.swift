@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Combine
 import ImageIO
 import UniformTypeIdentifiers
@@ -151,6 +152,43 @@ final class TagStore: ObservableObject {
     /// NSFW tag typically defaults to `.exclude` so it never shows unopted.
     @Published var tagDefaults: [String: TriState] = [:]
 
+    // Encrypted vault (optional). Hidden-tagged files live inside an AES-256
+    // disk image that is attached only while revealed; see `VaultDisk`.
+    @Published private(set) var vaultEnabled = VaultDisk.exists
+    /// Vault work in flight ("Securing 3/40…"); nil when idle.
+    @Published private(set) var vaultStatus: String?
+    @Published var vaultError: String?
+    /// The keychain has no vault key; only the recovery key can open it.
+    @Published private(set) var vaultKeyMissing = false
+    /// Reveal with Touch ID / the login password instead of (or besides) the passcode.
+    @Published var useDeviceAuth = UserDefaults.standard.bool(forKey: "useDeviceAuth") {
+        didSet { UserDefaults.standard.set(useDeviceAuth, forKey: "useDeviceAuth") }
+    }
+    /// Lock after the app sits in the background this long. 0 = never.
+    @Published var autoLockMinutes = UserDefaults.standard.integer(forKey: "autoLockMinutes") {
+        didSet {
+            UserDefaults.standard.set(autoLockMinutes, forKey: "autoLockMinutes")
+            autoLock?.idleMinutes = autoLockMinutes
+        }
+    }
+    /// On lock, empty every thumbnail cache (Overlap's and the system QuickLook
+    /// cache) instead of only what the vault touched. Thorough, but the whole
+    /// grid and Finder re-render thumbnails from source afterwards.
+    @Published var purgeAllThumbnailsOnLock = UserDefaults.standard.bool(forKey: "purgeAllThumbnailsOnLock") {
+        didSet { UserDefaults.standard.set(purgeAllThumbnailsOnLock, forKey: "purgeAllThumbnailsOnLock") }
+    }
+    /// The attached vault's files; also merged into `allItems` while revealed.
+    private var vaultItems: [FileItem] = []
+    private var vaultBusy = false
+    private var vaultNeedsReconcile = false
+    /// Paths that failed to move this session, so a stuck file can't make
+    /// every catalog update re-attach the vault.
+    private var vaultFailedPaths: Set<String> = []
+    private var autoLock: AutoLock?
+    /// Bumped by every lock, so a reveal still attaching when the Mac sleeps
+    /// can't complete afterwards.
+    private var lockEpoch = 0
+
     // Results
     @Published var results: [FileItem] = []
     @Published var sortKey: SortKey = .name
@@ -183,6 +221,10 @@ final class TagStore: ObservableObject {
     /// Finder-style drill path. Empty = the watched folders; otherwise the queue
     /// shows the immediate contents of the last URL (so you can step deeper).
     @Published var queueDrill: [URL] = []
+    /// Folders the connected services fill and keep tagged themselves; the
+    /// queue never lists them or anything inside. Asked at scan time so it
+    /// follows the current library scope.
+    var queueExclusions: () -> [URL] = { [] }
 
     // Undo
     @Published private(set) var canUndo = false
@@ -210,6 +252,8 @@ final class TagStore: ObservableObject {
         activeGroupID = groups[0].id
         loadSavedQueries()
         loadQueueFolders()
+        loadPrivateSettings()
+        startAutoLock()
         applyQueryDefaults()   // seed the query from per-tag default stances
         loadCache()            // instant tags from disk; Spotlight reconciles async
         wireQueries()
@@ -302,12 +346,13 @@ final class TagStore: ObservableObject {
             let deduped = TagStore.deduped(built)
             await MainActor.run {
                 guard let self else { return }
-                self.allItems = deduped
+                self.allItems = deduped + self.vaultItems   // vault isn't in Spotlight
                 self.recomputeCounts()   // rebuilds the visible pool + counts + tree
                 self.isIndexing = false
                 self.refreshVisible()
                 self.catalogQuery.enableUpdates()
                 self.saveCache()
+                self.reconcileVault()
                 // Catalog is loaded — build/refresh the plugins' persistent indexes
                 // in the background so the first Suggest isn't the slow one.
                 self.warmUpPlugins()
@@ -355,6 +400,7 @@ final class TagStore: ObservableObject {
         recomputeCounts()
         refreshVisible()
         saveCache()
+        reconcileVault()   // a file tagged hidden in Finder goes into the vault
     }
 
     // MARK: - Catalog cache (instant launch)
@@ -403,10 +449,12 @@ final class TagStore: ObservableObject {
         }
     }
 
-    /// Write the current catalog to disk off the main thread.
+    /// Write the current catalog to disk off the main thread. Hidden files
+    /// (and so every hidden tag name) are left out: the cache is plaintext.
     private func saveCache() {
         guard let url = cacheURL(for: scopeURL) else { return }
-        let snapshot = CatalogCache(items: allItems.map {
+        let shareable = allItems.filter { !itemHidden($0) && !VaultDisk.contains($0.id) }
+        let snapshot = CatalogCache(items: shareable.map {
             .init(path: $0.url.path, tags: $0.tags,
                   mod: $0.modDate, created: $0.createdDate, size: $0.size, kind: $0.kind.rawValue)
         })
@@ -496,7 +544,7 @@ final class TagStore: ObservableObject {
         var order = names
         order.move(fromOffsets: from, toOffset: to)
         tagOrder = order
-        UserDefaults.standard.set(order, forKey: "tagOrder")
+        persistPrivacySensitive()
     }
 
     func addKnownTag(_ raw: String) {
@@ -509,7 +557,7 @@ final class TagStore: ObservableObject {
     }
 
     private func saveKnownTags() {
-        UserDefaults.standard.set(Array(knownTags), forKey: "knownTags")
+        persistPrivacySensitive()
     }
 
     private func recomputeCounts() {
@@ -741,22 +789,45 @@ final class TagStore: ObservableObject {
         savedQueries = decoded
     }
 
+    /// Queries naming a hidden tag go to the keychain with the other private
+    /// settings; the plist keeps the rest.
     private func persistSavedQueries() {
-        if let data = try? JSONEncoder().encode(savedQueries) {
-            UserDefaults.standard.set(data, forKey: savedQueriesKey)
-        }
+        persistPrivacySensitive()
     }
 
-    /// Snapshot the current diagrams + excludes under `name`. Same name
-    /// overwrites, so re-saving updates in place.
-    func saveCurrentQuery(name: String) {
+    func isPrivateQuery(_ q: SavedQuery) -> Bool {
+        q.allTags.contains { isHiddenTag($0) }
+    }
+
+    /// The saved queries the user may see: ones naming a hidden tag only
+    /// while revealed.
+    var visibleSavedQueries: [SavedQuery] {
+        revealed ? savedQueries : savedQueries.filter { !isPrivateQuery($0) }
+    }
+
+    /// Snapshot of the live query — diagrams, excludes, search text, and the
+    /// type filter when `includeTypes`.
+    func currentQuerySnapshot(name: String, includeTypes: Bool = false) -> SavedQuery {
+        let hasTypes = includeTypes && (!kindFilter.isEmpty || !extFilter.isEmpty)
+        return SavedQuery(name: name, groups: groups, excludes: activeExcludes,
+                          searchQuery: searchQuery,
+                          kinds: hasTypes ? kindFilter.map(\.rawValue).sorted() : nil,
+                          exts: hasTypes ? extFilter.sorted() : nil)
+    }
+
+    var hasTypeFilter: Bool { !kindFilter.isEmpty || !extFilter.isEmpty }
+
+    /// Snapshot the current query under `name`. Same name overwrites, so
+    /// re-saving updates in place.
+    func saveCurrentQuery(name: String, includeTypes: Bool = false) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        var snapshot = currentQuerySnapshot(name: trimmed, includeTypes: includeTypes)
         if let i = savedQueries.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) {
-            savedQueries[i].groups = groups
-            savedQueries[i].excludes = Array(queryExcludes)
+            snapshot.id = savedQueries[i].id
+            savedQueries[i] = snapshot
         } else {
-            savedQueries.append(SavedQuery(name: trimmed, groups: groups, excludes: Array(queryExcludes)))
+            savedQueries.append(snapshot)
         }
         persistSavedQueries()
     }
@@ -764,11 +835,79 @@ final class TagStore: ObservableObject {
     /// Replace the live query with a saved one and refresh.
     func applySavedQuery(_ id: UUID) {
         guard let q = savedQueries.first(where: { $0.id == id }) else { return }
+        applyQuery(q)
+    }
+
+    /// Make `q` the live query: diagrams, excludes, type filter (when it has
+    /// one), and the search (run, or cleared when it has none).
+    func applyQuery(_ q: SavedQuery) {
+        if mode == .queue {
+            mode = .tags
+            selection = []
+        }
         groups = q.groups.isEmpty ? [VennGroup()] : q.groups
         activeGroupID = groups[0].id
         queryExcludes = Set(q.excludes)
         for gi in groups.indices { pruneEmptyRegions(gi) }
-        refreshResults()
+        if q.kinds != nil || q.exts != nil {
+            kindFilter = Set((q.kinds ?? []).compactMap(FileKind.init(rawValue:)))
+            extFilter = Set(q.exts ?? [])
+        }
+        if !revealed {
+            reconcileHiddenInQuery()   // an imported query may name hidden tags
+        }
+        if let text = q.searchQuery, !text.isEmpty {
+            clearSearch(refresh: false)
+            refreshResults()
+            runSearch(text)
+        } else {
+            clearSearch()
+        }
+    }
+
+    /// Suspend until a running (or index-pending) search has delivered results.
+    func waitForSearch(timeout: TimeInterval = 180) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while searching && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// Which of these logical paths (see `VaultDisk.originalPath`) belong to
+    /// hidden files: carrying a hidden tag, or living in the vault.
+    func privatePaths(among paths: [String]) -> Set<String> {
+        guard !hiddenTags.isEmpty || vaultEnabled, !paths.isEmpty else {
+            return []
+        }
+        let wanted = Set(paths)
+        var known: [String: FileItem] = [:]
+        for item in allItems + queueItems {
+            let logical = VaultDisk.originalPath(of: item.id)
+            if wanted.contains(logical) {
+                known[logical] = item
+            }
+        }
+        let checkVault = vaultEnabled && VaultDisk.isAttached
+        let fm = FileManager.default
+        var out = Set<String>()
+        for path in wanted {
+            if let item = known[path] {
+                if itemHidden(item) || isVaultItem(item) {
+                    out.insert(path)
+                }
+            } else if checkVault,
+                      fm.fileExists(atPath: VaultDisk.vaultURL(forOriginal: URL(fileURLWithPath: path)).path) {
+                out.insert(path)
+            }
+        }
+        return out
+    }
+
+    func renameSavedQuery(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let i = savedQueries.firstIndex(where: { $0.id == id }) else { return }
+        savedQueries[i].name = trimmed
+        persistSavedQueries()
     }
 
     func deleteSavedQuery(_ id: UUID) {
@@ -776,12 +915,43 @@ final class TagStore: ObservableObject {
         persistSavedQueries()
     }
 
+    /// File › Open Query…: pick an exported folder (or its manifest) and make
+    /// the query that produced it live again.
+    func openQueryFile() {
+        let panel = NSOpenPanel()
+        panel.title = "Open Query"
+        panel.message = "Choose a folder exported from Overlap, or its .overlap-query.json."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        let manifestURL = isDir ? url.appendingPathComponent(".overlap-query.json") : url
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? dec.decode(QueryExportManifest.self, from: data) else {
+            let alert = NSAlert()
+            alert.messageText = "No Overlap query found"
+            alert.informativeText = "\(url.lastPathComponent) has no readable .overlap-query.json."
+            alert.runModal()
+            return
+        }
+        let hasTypes = !manifest.kinds.isEmpty || !manifest.exts.isEmpty
+        applyQuery(SavedQuery(name: manifest.query, groups: manifest.groups,
+                              excludes: manifest.excludes, searchQuery: manifest.searchQuery,
+                              kinds: hasTypes ? manifest.kinds : [],
+                              exts: hasTypes ? manifest.exts : []))
+    }
+
     // MARK: - Hidden tags & default stance (public)
 
     func setHidden(_ tag: String, _ hidden: Bool) {
         if hidden { hiddenTags.insert(tag) } else { hiddenTags.remove(tag) }
-        UserDefaults.standard.set(Array(hiddenTags), forKey: hiddenTagsKey)
+        persistPrivacySensitive()
         applyVisibility()
+        reconcileVault()
     }
 
     func defaultStance(_ tag: String) -> TriState { tagDefaults[tag] ?? .off }
@@ -789,54 +959,446 @@ final class TagStore: ObservableObject {
     func setDefault(_ tag: String, _ stance: TriState) {
         if stance == .off { tagDefaults.removeValue(forKey: tag) }
         else { tagDefaults[tag] = stance }
-        UserDefaults.standard.set(tagDefaults.mapValues { $0.rawValue }, forKey: tagDefaultsKey)
+        persistPrivacySensitive()
+    }
+
+    /// Load hidden-tag state from the keychain, migrating the old plaintext
+    /// UserDefaults list the first time.
+    private func loadPrivateSettings() {
+        let legacyHidden = UserDefaults.standard.stringArray(forKey: hiddenTagsKey) ?? []
+        let secret = PrivateSettings.load() ?? PrivateSettings()
+        hiddenTags = Set(secret.hiddenTags).union(legacyHidden)
+        knownTags.formUnion(secret.knownTags)
+        let savedIDs = Set(savedQueries.map(\.id))
+        savedQueries += (secret.savedQueries ?? []).filter { !savedIDs.contains($0.id) }
+        for (tag, raw) in secret.tagDefaults {
+            if let stance = TriState(rawValue: raw) {
+                tagDefaults[tag] = stance
+            }
+        }
+        if !legacyHidden.isEmpty {
+            UserDefaults.standard.removeObject(forKey: hiddenTagsKey)
+        }
+        // Older builds kept every saved query in the plist, hidden tags included.
+        let plistNamesHidden = (secret.savedQueries ?? []).count
+            < savedQueries.filter { isPrivateQuery($0) }.count
+        if !legacyHidden.isEmpty || plistNamesHidden {
+            persistPrivacySensitive()
+        }
+    }
+
+    /// Split state that can name a hidden tag: hidden entries go to the
+    /// keychain, UserDefaults keeps the rest, so its plist never lists them.
+    private func persistPrivacySensitive() {
+        let privateQueries = savedQueries.filter { isPrivateQuery($0) }
+        PrivateSettings(hiddenTags: Array(hiddenTags),
+                        tagDefaults: tagDefaults.filter { isHiddenTag($0.key) }.mapValues(\.rawValue),
+                        knownTags: knownTags.filter { isHiddenTag($0) },
+                        savedQueries: privateQueries.isEmpty ? nil : privateQueries).save()
+        let defaults = UserDefaults.standard
+        if let data = try? JSONEncoder().encode(savedQueries.filter { !isPrivateQuery($0) }) {
+            defaults.set(data, forKey: savedQueriesKey)
+        }
+        defaults.set(Array(knownTags.filter { !isHiddenTag($0) }), forKey: "knownTags")
+        defaults.set(tagDefaults.filter { !isHiddenTag($0.key) }.mapValues { $0.rawValue },
+                     forKey: tagDefaultsKey)
+        defaults.set(tagOrder.filter { !isHiddenTag($0) }, forKey: "tagOrder")
     }
 
     // MARK: - Passcode / reveal
 
-    var hasPasscode: Bool { UserDefaults.standard.string(forKey: passHashKey) != nil }
+    /// A passcode set before 0.4 still sits in UserDefaults as a plain SHA256;
+    /// it moves to the keychain as PBKDF2 on its first successful use.
+    private var hasLegacyPasscode: Bool { UserDefaults.standard.string(forKey: passHashKey) != nil }
+
+    var hasPasscode: Bool { Passcode.isSet || hasLegacyPasscode }
+
+    /// Reveal must go through Touch ID / the login password: chosen by the
+    /// user, or forced when a vault exists and no passcode guards it.
+    var revealNeedsDeviceAuth: Bool { useDeviceAuth || (vaultEnabled && !hasPasscode) }
+
+    /// Changing privacy settings needs the same authority as revealing.
+    var canEditPrivacy: Bool { revealed || (!hasPasscode && !vaultEnabled) }
 
     func setPasscode(_ code: String) {
         guard !code.isEmpty else { return }
-        let salt = Self.randomSalt()
-        UserDefaults.standard.set(salt, forKey: passSaltKey)
-        UserDefaults.standard.set(Self.hashPass(code, salt: salt), forKey: passHashKey)
+        Passcode.set(code)
+        clearLegacyPasscode()
     }
 
     func removePasscode() {
+        Passcode.remove()
+        clearLegacyPasscode()
+    }
+
+    func verifyPasscode(_ code: String) -> Bool {
+        if Passcode.isSet {
+            return Passcode.verify(code)
+        }
+        guard let salt = UserDefaults.standard.string(forKey: passSaltKey),
+              let hash = UserDefaults.standard.string(forKey: passHashKey) else { return true }
+        guard Self.legacyHash(code, salt: salt) == hash else { return false }
+        setPasscode(code)   // upgrade in place
+        return true
+    }
+
+    private func clearLegacyPasscode() {
         UserDefaults.standard.removeObject(forKey: passSaltKey)
         UserDefaults.standard.removeObject(forKey: passHashKey)
     }
 
-    func verifyPasscode(_ code: String) -> Bool {
-        guard let salt = UserDefaults.standard.string(forKey: passSaltKey),
-              let hash = UserDefaults.standard.string(forKey: passHashKey) else { return true }
-        return Self.hashPass(code, salt: salt) == hash
+    private static func legacyHash(_ code: String, salt: String) -> String {
+        SHA256.hash(data: Data((salt + code).utf8))
+            .map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Reveal hidden tags. Returns false only when a passcode is set and wrong.
+    /// Reveal with the passcode. Returns false when the passcode is wrong, or
+    /// when there is none and device auth is required instead.
     @discardableResult
     func reveal(_ code: String = "") -> Bool {
-        if hasPasscode && !verifyPasscode(code) { return false }
-        revealed = true
-        applyVisibility()
+        if hasPasscode {
+            guard verifyPasscode(code) else { return false }
+        } else if revealNeedsDeviceAuth {
+            return false
+        }
+        unlock()
         return true
     }
 
-    func lock() {
-        revealed = false
+    func revealWithDeviceAuth() {
+        Task {
+            guard await DeviceAuth.authenticate(reason: "reveal hidden tags") else { return }
+            unlock()
+        }
+    }
+
+    /// Open the vault with the recovery key (keychain entry lost). On success
+    /// the key goes back into the keychain and hidden tags are revealed.
+    func revealWithRecoveryKey(_ input: String) {
+        let key = VaultDisk.normalizeKey(input)
+        let epoch = lockEpoch
+        attachVault(key: key) { [weak self] ok in
+            guard let self, ok else { return }
+            VaultDisk.storeKey(key)
+            self.vaultKeyMissing = false
+            self.vaultError = nil
+            self.finishReveal(ifStill: epoch)
+        }
+    }
+
+    /// The vault key, for the user to write down. Only while revealed.
+    func recoveryKey() -> String? {
+        revealed ? VaultDisk.storedKey() : nil
+    }
+
+    private func unlock() {
+        guard !revealed else { return }
+        let epoch = lockEpoch
+        guard vaultEnabled else {
+            finishReveal(ifStill: epoch)
+            return
+        }
+        guard let key = VaultDisk.storedKey() else {
+            vaultKeyMissing = true
+            return
+        }
+        attachVault(key: key) { [weak self] ok in
+            if ok {
+                self?.finishReveal(ifStill: epoch)
+            }
+        }
+    }
+
+    private func finishReveal(ifStill epoch: Int) {
+        guard epoch == lockEpoch else {
+            // Locked while the vault was opening: close it again.
+            dropVaultItems()
+            detachVaultIfIdle()
+            return
+        }
+        revealed = true
         applyVisibility()
+        reconcileVault()   // pull out anything unhidden while it was locked
     }
 
-    private static func randomSalt() -> String {
-        var bytes = [UInt8](repeating: 0, count: 16)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return Data(bytes).base64EncodedString()
+    func lock() {
+        lockEpoch += 1
+        guard revealed else { return }
+        revealed = false
+        dropVaultItems()
+        let purgeAll = purgeAllThumbnailsOnLock
+        if purgeAll {
+            ThumbnailCache.shared.removeAll()
+        } else {
+            ThumbnailCache.shared.removeVaultThumbnails()
+        }
+        applyVisibility()
+        detachVaultIfIdle()
+        if vaultEnabled {
+            // The preview pane and Quick Look panel render through QuickLook.
+            Task.detached(priority: .utility) {
+                if purgeAll {
+                    QuickLookCache.reset()
+                } else {
+                    QuickLookCache.resetIfVaultFilesPreviewed()
+                }
+            }
+        }
     }
 
-    private static func hashPass(_ code: String, salt: String) -> String {
-        SHA256.hash(data: Data((salt + code).utf8))
-            .map { String(format: "%02x", $0) }.joined()
+    private func startAutoLock() {
+        autoLock = AutoLock(idleMinutes: autoLockMinutes) { [weak self] in self?.lock() }
+        // A crash while revealed can leave the vault attached; launch is locked.
+        if VaultDisk.isAttached {
+            detachVaultIfIdle()
+        }
+    }
+
+    // MARK: - Vault
+
+    private func isVaultItem(_ item: FileItem) -> Bool { VaultDisk.contains(item.id) }
+
+    /// Attach off-main and fold the vault's files into the catalog.
+    private func attachVault(key: String, then done: @escaping @MainActor (Bool) -> Void) {
+        guard !vaultBusy else {
+            done(false)
+            return
+        }
+        vaultBusy = true
+        vaultStatus = "Unlocking vault…"
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = Result { () throws -> [FileItem] in
+                try VaultDisk.attach(key: key)
+                return VaultDisk.scanFiles().map { FileItem.load($0) }
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.vaultBusy = false
+                self.vaultStatus = nil
+                switch result {
+                case .success(let items):
+                    self.vaultError = nil
+                    self.vaultItems = items
+                    self.allItems.removeAll { self.isVaultItem($0) }
+                    self.allItems += items
+                    done(true)
+                case .failure(let error):
+                    self.vaultError = "Couldn't open the vault: \(error.localizedDescription)"
+                    done(false)
+                }
+            }
+        }
+    }
+
+    /// Forget every vault file (the image is about to detach).
+    private func dropVaultItems() {
+        let ids = Set(vaultItems.map(\.id))
+        vaultItems = []
+        allItems.removeAll { ids.contains($0.id) }
+        selection.subtract(ids)
+        for id in ids {
+            searchExtras.removeValue(forKey: id)
+        }
+    }
+
+    private func detachVaultIfIdle() {
+        guard !vaultBusy else { return }   // the running job detaches when it ends
+        Task.detached(priority: .userInitiated) {
+            VaultDisk.detach()
+        }
+    }
+
+    /// Create the vault and move every hidden file into it. `done` receives the
+    /// recovery key to show the user once, or nil on failure.
+    func createVault(_ done: @escaping @MainActor (String?) -> Void) {
+        guard !vaultEnabled, !vaultBusy, canEditPrivacy else {
+            done(nil)
+            return
+        }
+        let key = VaultDisk.generateKey()
+        guard VaultDisk.storeKey(key) else {
+            vaultError = "Couldn't save the vault key to the keychain."
+            done(nil)
+            return
+        }
+        vaultBusy = true
+        vaultStatus = "Creating vault…"
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = Result { try VaultDisk.create(key: key) }
+            await MainActor.run {
+                guard let self else { return }
+                self.vaultBusy = false
+                self.vaultStatus = nil
+                switch result {
+                case .success:
+                    self.vaultEnabled = true
+                    self.vaultError = nil
+                    done(key)
+                    if self.revealed {
+                        self.attachVault(key: key) { ok in
+                            if ok {
+                                self.reconcileVault()
+                            }
+                        }
+                    } else {
+                        self.reconcileVault()
+                    }
+                case .failure(let error):
+                    VaultDisk.deleteKey()
+                    self.vaultError = "Couldn't create the vault: \(error.localizedDescription)"
+                    done(nil)
+                }
+            }
+        }
+    }
+
+    /// Keep "hidden ⇔ in the vault": files carrying a hidden tag move in, and
+    /// vault files that no longer carry one move back to where they came from.
+    /// Runs off-main with progress; attaches the vault briefly when locked.
+    private func reconcileVault() {
+        guard vaultEnabled else { return }
+        guard !vaultBusy else {
+            vaultNeedsReconcile = true
+            return
+        }
+        var seen = Set<String>()
+        let incoming = (allItems + queueItems).filter {
+            !isVaultItem($0) && itemHidden($0) && !vaultFailedPaths.contains($0.id)
+                && seen.insert($0.id).inserted
+        }
+        let outgoing = revealed ? vaultItems.filter { !itemHidden($0) && !vaultFailedPaths.contains($0.id) } : []
+        guard !incoming.isEmpty || !outgoing.isEmpty else { return }
+        guard let key = VaultDisk.storedKey() else {
+            vaultKeyMissing = true
+            return
+        }
+        vaultBusy = true
+        let total = incoming.count + outgoing.count
+        vaultStatus = "Securing 0/\(total)…"
+        let ins = incoming.map(\.url), outs = outgoing.map(\.url)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let outcome = VaultMover.run(key: key, into: ins, outOf: outs) { done in
+                if done % 10 == 0 || done == total {
+                    Task { @MainActor in self?.vaultStatus = "Securing \(done)/\(total)…" }
+                }
+            }
+            await MainActor.run { self?.finishVaultMoves(outcome) }
+        }
+    }
+
+    private func finishVaultMoves(_ outcome: VaultMoveOutcome) {
+        vaultBusy = false
+        vaultStatus = nil
+        vaultFailedPaths.formUnion(outcome.failed)
+        if let error = outcome.error {
+            vaultError = error
+        }
+        let movedIn = Set(outcome.movedIn.map(\.from.path))
+        let movedOut = Set(outcome.movedOut.map(\.from.path))
+        let gone = movedIn.union(movedOut)
+        allItems.removeAll { gone.contains($0.id) }
+        queueItems.removeAll { movedIn.contains($0.id) }
+        vaultItems.removeAll { movedOut.contains($0.id) }
+        searchHits = searchHits?.filter { !movedIn.contains($0.path) }
+        for id in gone {
+            searchExtras.removeValue(forKey: id)
+        }
+        if revealed {
+            let arrived = outcome.movedIn.map { FileItem.load($0.to) }
+            vaultItems += arrived
+            allItems += arrived
+            var newSelection = selection
+            for m in outcome.movedIn where newSelection.remove(m.from.path) != nil {
+                newSelection.insert(m.to.path)
+            }
+            selection = newSelection
+        } else {
+            selection.subtract(movedIn)
+        }
+        selection.subtract(movedOut)
+        if !gone.isEmpty {
+            // Recorded undo steps point at the old paths.
+            undoStack.removeAll()
+            redoStack.removeAll()
+            updateUndoFlags()
+        }
+        readd(outcome.movedOut.map(\.to))   // back in the catalog before Spotlight notices
+        saveCache()
+        if !movedIn.isEmpty {
+            // Plugins forget a file only on a full sync after it leaves the disk.
+            // The corpus signature excludes hidden files, so it didn't change: force it.
+            lastWarmedSig = ""
+            lastSearchWarmedSig = ""
+            warmUpPlugins()
+        }
+        if !revealed {
+            detachVaultIfIdle()
+        }
+        if vaultNeedsReconcile {
+            vaultNeedsReconcile = false
+            reconcileVault()
+        }
+    }
+
+    /// Bytes the vault image takes on disk vs what its files use. Off-main.
+    func vaultUsage() async -> VaultDisk.Usage? {
+        guard revealed, vaultEnabled else { return nil }
+        return await Task.detached(priority: .utility) { VaultDisk.usage() }.value
+    }
+
+    /// Rebuild the image to give freed space back to the disk.
+    func reclaimVaultSpace(_ done: @escaping @MainActor () -> Void) {
+        guard revealed, vaultEnabled, !vaultBusy, let key = VaultDisk.storedKey() else {
+            done()
+            return
+        }
+        vaultBusy = true
+        vaultStatus = "Reclaiming space…"
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = Result { try VaultDisk.rebuild(key: key) }
+            await MainActor.run {
+                guard let self else { return }
+                self.vaultBusy = false
+                self.vaultStatus = nil
+                if case .failure(let error) = result {
+                    self.vaultError = "Couldn't reclaim space: \(error.localizedDescription)"
+                }
+                if !self.revealed {
+                    self.detachVaultIfIdle()
+                }
+                done()
+            }
+        }
+    }
+
+    /// Move every vault file back to its original place, then delete the
+    /// image and its key. Hidden tags stay hidden (UI filter only again).
+    func removeVault() {
+        guard revealed, vaultEnabled, !vaultBusy, let key = VaultDisk.storedKey() else { return }
+        vaultBusy = true
+        let outs = vaultItems.map(\.url)
+        let total = outs.count
+        vaultStatus = "Restoring 0/\(total)…"
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let outcome = VaultMover.run(key: key, into: [], outOf: outs) { done in
+                if done % 10 == 0 || done == total {
+                    Task { @MainActor in self?.vaultStatus = "Restoring \(done)/\(total)…" }
+                }
+            }
+            let emptied = outcome.failed.isEmpty && VaultDisk.scanFiles().isEmpty
+            if emptied {
+                VaultDisk.destroy()
+            }
+            await MainActor.run {
+                guard let self else { return }
+                if emptied {
+                    self.vaultEnabled = false
+                } else {
+                    outcome.error.map { self.vaultError = "Some files couldn't be restored: \($0)" }
+                }
+                self.finishVaultMoves(outcome)
+            }
+        }
     }
 
     func popSet() {
@@ -1146,8 +1708,12 @@ final class TagStore: ObservableObject {
         for id in ids where searchExtras[id] != nil {
             searchExtras[id] = FileItem.load(URL(fileURLWithPath: id))
         }
+        for i in vaultItems.indices where ids.contains(vaultItems[i].id) {
+            vaultItems[i] = FileItem.load(vaultItems[i].url)
+        }
         recomputeCounts()
         refreshVisible()
+        reconcileVault()   // gaining or losing a hidden tag moves the file
     }
 
     private func lowSetTag(_ tag: String, on urls: [URL], add: Bool) {
@@ -1173,20 +1739,56 @@ final class TagStore: ObservableObject {
 
     // MARK: - Tag suggestions (out-of-process plugins)
 
-    /// The tagged corpus handed to plugins that ask for it (`wantsLibrary`):
-    /// every visible file that already carries at least one tag. Respects the
-    /// hidden-tag pool, so locked hidden files never leak into a plugin.
     /// The corpus similarity plugins (`wantsLibrary`) match against: the full
     /// tagged catalog (`allItems`) unioned with any tagged items in the current
     /// view/queue, deduped by path. Using `allItems` — not just what's visible —
     /// is what lets a fresh untagged queue match against the whole library; adding
     /// the visible tagged items lets queue items tagged this session inform the
     /// rest before Spotlight reindexes them into the catalog.
+    ///
+    /// Hidden files are left out even while revealed: plugins persist what
+    /// they're sent (paths, tags, OCR text) in plaintext caches.
     var taggedLibrary: [FileItem] {
         var byPath: [String: FileItem] = [:]
-        for it in allItems where !it.tags.isEmpty { byPath[it.url.path] = it }
-        for it in visibleItems where !it.tags.isEmpty { byPath[it.url.path] = it }
+        for it in allItems + visibleItems where !it.tags.isEmpty && pluginMaySee(it) {
+            byPath[it.url.path] = it
+        }
         return Array(byPath.values)
+    }
+
+    private func pluginMaySee(_ item: FileItem) -> Bool {
+        !itemHidden(item) && !isVaultItem(item)
+    }
+
+    // MARK: - Source plugins (external services)
+
+    /// Which of `urls` may leave the machine: the same rule as the suggest
+    /// plugins — never a hidden-tag file or a vault file, even while revealed.
+    func shareableForSource(_ urls: [URL]) -> (allowed: [URL], dropped: Int) {
+        let known = Dictionary((allItems + queueItems + vaultItems).map { ($0.id, $0) },
+                               uniquingKeysWith: { first, _ in first })
+        let allowed = urls.filter { url in
+            pluginMaySee(known[url.path] ?? FileItem.load(url))
+        }
+        return (allowed, urls.count - allowed.count)
+    }
+
+    /// Catalog files carrying `tag`, outside the vault.
+    func paths(taggedWith tag: String) -> [String] {
+        allItems.filter { $0.tags.contains(tag) && !isVaultItem($0) }.map(\.id)
+    }
+
+    /// Fold files a source plugin created or retagged into the catalog now,
+    /// rather than waiting for Spotlight to notice them.
+    func adoptSourceFiles(_ urls: [URL], tags newTags: [String]) {
+        guard !urls.isEmpty else {
+            return
+        }
+        for tag in newTags where !knownTags.contains(tag) {
+            addKnownTag(tag)
+        }
+        syncTags(for: urls)
+        readd(urls)
     }
 
     /// Last corpus signature sent to the similarity plugins. Resets to "" each
@@ -1200,8 +1802,9 @@ final class TagStore: ObservableObject {
     /// thousands. (path.hashValue is per-launch, which is why the first run re-syncs.)
     private func corpusSignature() -> String {
         var h: UInt64 = 14695981039346656037
-        h = (h ^ UInt64(allItems.count)) &* 1099511628211
-        for it in allItems {
+        let corpus = allItems.filter(pluginMaySee)
+        h = (h ^ UInt64(corpus.count)) &* 1099511628211
+        for it in corpus {
             h = (h ^ UInt64(bitPattern: Int64(it.url.path.hashValue))) &* 1099511628211
             for t in it.tags { h = (h ^ UInt64(bitPattern: Int64(t.hashValue))) &* 1099511628211 }
         }
@@ -1254,6 +1857,11 @@ final class TagStore: ObservableObject {
                                      onlyPlugin: String? = nil,
                                      onProgress: @escaping @Sendable (String) -> Void,
                                      completion: @escaping @MainActor ([TagSuggestion]) -> Void) {
+        let items = items.filter(pluginMaySee)
+        guard !items.isEmpty else {
+            completion([])
+            return
+        }
         let files = items.map { RequestFile(path: $0.url.path, kind: $0.kind.rawValue,
                                             ext: $0.ext, tags: $0.tags, size: $0.size,
                                             modDate: $0.modDate, createdDate: $0.createdDate) }
@@ -1267,7 +1875,7 @@ final class TagStore: ObservableObject {
                                               tags: $0.tags, modDate: $0.modDate) }
             : []
         lastSentCorpusSig = sig
-        let known = Array(knownTags)
+        let known = Array(knownTags.filter { !isHiddenTag($0) })
         let kinds = Set(items.map(\.kind))
         let settings = pluginSettings
         var disabled = disabledPluginIDs
@@ -1462,7 +2070,7 @@ final class TagStore: ObservableObject {
         let library = taggedLibrary.map { LibraryItem(path: $0.url.path, kind: $0.kind.rawValue,
                                                       tags: $0.tags, modDate: $0.modDate) }
         lastSentCorpusSig = sig   // this run delivers the corpus; later runs send []
-        let known = Array(knownTags)
+        let known = Array(knownTags.filter { !isHiddenTag($0) })
         let disabled = disabledPluginIDs
         let settings = pluginSettings
         Task.detached(priority: .utility) {
@@ -1500,7 +2108,7 @@ final class TagStore: ObservableObject {
     /// depth), tagged or not — the semantic-search corpus. Off-main. Returns a
     /// cheap signature too, so an unchanged corpus isn't re-sent.
     nonisolated private static func searchCorpus(scope: URL, queueFolders: [URL], queueDepth: Int,
-                                                 tagsByPath: [String: [String]])
+                                                 tagsByPath: [String: [String]], excluded: Set<String>)
         -> (items: [LibraryItem], sig: String) {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
@@ -1519,7 +2127,7 @@ final class TagStore: ObservableObject {
                 }
                 guard kind == .image else { continue }
                 let path = canon(url.path).path
-                guard seen.insert(path).inserted else { continue }
+                guard !excluded.contains(path), seen.insert(path).inserted else { continue }
                 let vals = try? url.resourceValues(forKeys: Set(keys))
                 guard vals?.isRegularFile != false else { continue }
                 let mod = vals?.contentModificationDate
@@ -1541,14 +2149,17 @@ final class TagStore: ObservableObject {
         guard searchAvailable, !searchIndexing, !searching else { return }
         let scope = scopeURL, folders = queueFolders, depth = queueDepth
         var tagsByPath: [String: [String]] = [:]
-        for it in allItems where !it.tags.isEmpty { tagsByPath[it.id] = it.tags }
+        for it in allItems where !it.tags.isEmpty && pluginMaySee(it) { tagsByPath[it.id] = it.tags }
+        // Hidden files outside the vault are still on disk under the scope.
+        let excluded = Set(allItems.filter { itemHidden($0) }.map(\.id))
         let disabled = disabledPluginIDs, settings = pluginSettings
         let lastSig = lastSearchWarmedSig
         let token = UUID()
         searchWarmupToken = token
         Task.detached(priority: .utility) { [weak self] in
             let corpus = Self.searchCorpus(scope: scope, queueFolders: folders,
-                                           queueDepth: depth, tagsByPath: tagsByPath)
+                                           queueDepth: depth, tagsByPath: tagsByPath,
+                                           excluded: excluded)
             guard force || corpus.sig != lastSig else { return }
             let proceed = await MainActor.run { () -> Bool in
                 guard let self, self.searchWarmupToken == token, !self.searchIndexing else { return false }
@@ -1879,6 +2490,7 @@ final class TagStore: ObservableObject {
             }
             if item.tags.isEmpty,
                queueFolders.contains(where: { url.path.hasPrefix($0.path) }),
+               !Self.isExcluded(url, from: queueExclusions().map { $0.standardizedFileURL.path }),
                !queueItems.contains(where: { $0.id == item.id }) {
                 queueItems.append(item)
             }
@@ -1947,12 +2559,14 @@ final class TagStore: ObservableObject {
         // stepping deeper is one click at a time; else the watched roots.
         let folders = queueDrill.last.map { [$0] } ?? queueFolders
         let depth = queueDrill.isEmpty ? queueDepth : 1
+        let excluded = queueExclusions().map { $0.standardizedFileURL.path }
         isScanning = true
         Task.detached(priority: .userInitiated) { [weak self] in
             let fm = FileManager.default
             var found: [FileItem] = []
             for folder in folders {
-                for url in TagStore.intakeURLs(in: folder, fm: fm, maxDepth: depth) {
+                for url in TagStore.intakeURLs(in: folder, fm: fm, maxDepth: depth)
+                where !TagStore.isExcluded(url, from: excluded) {
                     let fi = FileItem.load(url)
                     if fi.tags.isEmpty { found.append(fi) }
                 }
@@ -1972,9 +2586,17 @@ final class TagStore: ObservableObject {
         }
     }
 
-    /// Queue items narrowed by the active type filter (kind + extension).
+    nonisolated private static func isExcluded(_ url: URL, from excluded: [String]) -> Bool {
+        let path = url.standardizedFileURL.path
+        return excluded.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
+
+    /// Queue items narrowed by the active type filter (kind + extension), minus
+    /// hidden-tagged ones while locked.
     private func filteredQueue() -> [FileItem] {
-        queueItems.filter { item in
+        let locked = !revealed && !hiddenTags.isEmpty
+        return queueItems.filter { item in
+            !(locked && itemHidden(item)) &&
             (kindFilter.isEmpty || kindFilter.contains(item.kind)) &&
             (extFilter.isEmpty || extFilter.contains(item.ext))
         }
@@ -2153,7 +2775,6 @@ final class TagStore: ObservableObject {
         showPreview = UserDefaults.standard.bool(forKey: "showPreview")
         knownTags = Set(UserDefaults.standard.stringArray(forKey: "knownTags") ?? [])
         tagOrder = UserDefaults.standard.stringArray(forKey: "tagOrder") ?? []
-        hiddenTags = Set(UserDefaults.standard.stringArray(forKey: hiddenTagsKey) ?? [])
         if let raw = UserDefaults.standard.dictionary(forKey: tagDefaultsKey) as? [String: Int] {
             tagDefaults = raw.compactMapValues { TriState(rawValue: $0) }
         }

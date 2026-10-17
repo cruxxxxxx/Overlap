@@ -1,8 +1,12 @@
 import SwiftUI
+import Quartz
 
 @main
 struct OverlapApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = TagStore(scope: defaultScope)
+    @StateObject private var boards = BoardStore()
+    @StateObject private var sources = SourceStore()
 
     static var defaultScope: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -13,35 +17,45 @@ struct OverlapApp: App {
         WindowGroup {
             TutorialHost { ContentView() }
                 .environmentObject(store)
+                .environmentObject(boards)
+                .environmentObject(sources)
                 .frame(minWidth: 900, minHeight: 560)
+                .background(MainWindowReader())
+                .onAppear {
+                    boards.attach(to: store)
+                    sources.attach(to: store)
+                }
         }
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .saveItem) {
+                Button("Open Query…") { store.openQueryFile() }
+                    .keyboardShortcut("o", modifiers: .command)
                 Button("Export Results as Folder…") { store.exportResults() }
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                     .disabled(store.results.isEmpty || store.exportProgress != nil)
+                Divider()
+                BoardMenuItems()
+                    .environmentObject(store)
+                    .environmentObject(boards)
+            }
+            CommandGroup(replacing: .undoRedo) {
+                BoardUndoMenuItems()
+                    .environmentObject(boards)
             }
             CommandGroup(replacing: .help) {
                 Button("Overlap Tutorial") {
                     NotificationCenter.default.post(name: .overlapStartTutorial, object: nil)
                 }
             }
+            CommandMenu("Sources") {
+                SourceMenuItems()
+                    .environmentObject(store)
+                    .environmentObject(sources)
+            }
             CommandMenu("Plugins") {
-                let plugins = PluginRegistry.discover()
-                    .sorted { $0.manifest.name < $1.manifest.name }
-                if plugins.isEmpty {
-                    Text("No plugins installed")
-                } else {
-                    ForEach(plugins) { p in
-                        Toggle(p.manifest.name, isOn: Binding(
-                            get: { !store.disabledPluginIDs.contains(p.id) },
-                            set: { on in
-                                if on { store.disabledPluginIDs.remove(p.id) }
-                                else { store.disabledPluginIDs.insert(p.id) }
-                            }))
-                    }
-                }
+                PluginToggleItems()
+                    .environmentObject(store)
                 Divider()
                 Button("Plugin Settings…") {
                     NotificationCenter.default.post(name: .overlapShowPluginSettings, object: nil)
@@ -70,6 +84,151 @@ struct OverlapApp: App {
                 }
             }
         }
+
+        Window("Connected Services", id: "sources") {
+            SourcesView()
+                .environmentObject(store)
+                .environmentObject(sources)
+        }
+
+        WindowGroup("Browse", id: "source-browser", for: String.self) { $pluginID in
+            if let pluginID {
+                SourceBrowserView(pluginID: pluginID)
+                    .environmentObject(store)
+                    .environmentObject(sources)
+                    .environmentObject(boards)
+                    .onAppear { boards.attach(to: store) }
+            }
+        }
+
+        WindowGroup("Board", id: "board", for: UUID.self) { $boardID in
+            BoardWindow(boardID: boardID)
+                .environmentObject(store)
+                .environmentObject(boards)
+                .environmentObject(sources)
+                .frame(minWidth: 600, minHeight: 400)
+                .onAppear { boards.attach(to: store) }
+        }
+    }
+}
+
+/// Edit › Undo / Redo: a board window's own history when one is in front,
+/// otherwise the usual responder-chain undo (text fields and the like).
+struct BoardUndoMenuItems: View {
+    @EnvironmentObject var boards: BoardStore
+
+    var body: some View {
+        Button("Undo") { perform(redo: false) }
+            .keyboardShortcut("z", modifiers: .command)
+        Button("Redo") { perform(redo: true) }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+    }
+
+    private func perform(redo: Bool) {
+        if let id = boards.boardID(in: NSApp.keyWindow) {
+            let manager = boards.undoManager(for: id)
+            if redo {
+                manager.redo()
+            } else {
+                manager.undo()
+            }
+        } else {
+            NSApp.sendAction(Selector((redo ? "redo:" : "undo:")), to: nil, from: nil)
+        }
+    }
+}
+
+/// Plugins menu: one on/off toggle per plugin, grouped by what it does.
+struct PluginToggleItems: View {
+    @EnvironmentObject var store: TagStore
+
+    private enum Group: CaseIterable {
+        case services, suggestions, search
+
+        var title: String {
+            switch self {
+            case .services:
+                return "Connected Services"
+            case .suggestions:
+                return "Tag Suggestions"
+            case .search:
+                return "Search"
+            }
+        }
+
+        func contains(_ plugin: DiscoveredPlugin) -> Bool {
+            switch self {
+            case .services:
+                return plugin.isSource
+            case .suggestions:
+                return plugin.supports("suggest")
+            case .search:
+                return plugin.supports("search")
+            }
+        }
+    }
+
+    var body: some View {
+        let plugins = PluginRegistry.discover().sorted { $0.manifest.name < $1.manifest.name }
+        if plugins.isEmpty {
+            Text("No plugins installed")
+        }
+        ForEach(Group.allCases.filter { group in plugins.contains(where: group.contains) }, id: \.title) { group in
+            Section(group.title) {
+                ForEach(plugins.filter(group.contains)) { plugin in
+                    Toggle(plugin.manifest.name, isOn: Binding(
+                        get: { !store.disabledPluginIDs.contains(plugin.id) },
+                        set: { on in
+                            if on {
+                                store.disabledPluginIDs.remove(plugin.id)
+                            } else {
+                                store.disabledPluginIDs.insert(plugin.id)
+                            }
+                        }))
+                }
+            }
+        }
+    }
+}
+
+/// File-menu board commands: board the current results, open a board.
+struct BoardMenuItems: View {
+    @EnvironmentObject var boards: BoardStore
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        NewBoardButton()
+            .keyboardShortcut("b", modifiers: [.command, .shift])
+        Menu("Open Board") {
+            if boards.boards.isEmpty {
+                Text("No boards")
+            } else {
+                ForEach(boards.boards) { board in
+                    Button(board.name) { openWindow(id: "board", value: board.id) }
+                }
+            }
+        }
+    }
+}
+
+/// Quitting while revealed must close the vault first. Do it after the
+/// windows are gone, so ⌘Q feels instant instead of waiting on hdiutil.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard VaultDisk.isAttached else {
+            return .terminateNow
+        }
+        for window in sender.windows {
+            window.orderOut(nil)
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            VaultDisk.detach()
+            QuickLookCache.resetIfVaultFilesPreviewed()
+            DispatchQueue.main.async {
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
     }
 }
 
@@ -158,6 +317,15 @@ struct ContentView: View {
             }
         }
         .navigationTitle("Overlap")
+        .onChange(of: store.revealed) { revealed in
+            // Locking must not leave a hidden file on screen.
+            if !revealed {
+                showSlideshow = false
+                if QLPreviewPanel.sharedPreviewPanelExists() {
+                    QLPreviewPanel.shared()?.orderOut(nil)
+                }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .overlapShowPluginSettings)) { _ in
             showPluginSettings = true
         }

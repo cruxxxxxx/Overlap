@@ -12,3 +12,6 @@ build/
 .build/
 .swiftpm/
 dist/
+
+# Test fixture binary (built by scripts/test-sources.swift instructions)
+scripts/fixtures/mocksource/mocksource

@@ -58,85 +58,14 @@ enum SuggestionEngine {
                                  source: plugin.manifest.name, group: $0.group) }
     }
 
-    /// The plugin process lifecycle shared by suggest and search: request on
-    /// stdin, stderr lines streamed as progress, stdout decoded as a response,
-    /// SIGTERM→SIGKILL past `timeoutMs`. Returns nil on any failure; callers
-    /// apply their own semantics (path validation, ranking) to the response.
+    /// The suggest/search shape of `PluginProcess.run`: a `SuggestRequest` in,
+    /// a `SuggestResponse` out. Returns nil on any failure.
     nonisolated static func runProcess(_ plugin: DiscoveredPlugin,
                                        request: SuggestRequest,
                                        timeoutMs: Int,
                                        onProgress: (@Sendable (String) -> Void)? = nil) -> SuggestResponse? {
-        guard let payload = try? PluginCoder.encoder.encode(request) else { return nil }
-
-        let proc = Process()
-        proc.executableURL = plugin.execURL
-        proc.currentDirectoryURL = plugin.dir
-        let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
-        proc.standardInput = stdin
-        proc.standardOutput = stdout
-        proc.standardError = stderr
-
-        // Stream stderr as progress: a plugin may emit human-readable status lines
-        // (e.g. "Building suggestion index… 300/4000") while it works; the last
-        // line is surfaced in the UI. Draining also prevents a chatty plugin from
-        // blocking on a full stderr pipe.
-        let errReader = stderr.fileHandleForReading
-        if let onProgress {
-            var buf = Data()
-            errReader.readabilityHandler = { h in
-                let chunk = h.availableData
-                guard !chunk.isEmpty else { return }
-                buf.append(chunk)
-                while let nl = buf.firstIndex(of: 0x0A) {
-                    let lineData = buf.subdata(in: buf.startIndex..<nl)
-                    buf.removeSubrange(buf.startIndex...nl)
-                    if let line = String(data: lineData, encoding: .utf8)?
-                        .trimmingCharacters(in: .whitespaces), !line.isEmpty {
-                        onProgress(line)
-                    }
-                }
-            }
-        }
-
-        do { try proc.run() } catch {
-            errReader.readabilityHandler = nil
-            NSLog("[plugins] \(plugin.id): failed to launch — \(error.localizedDescription)")
-            return nil
-        }
-
-        // Feed stdin then close so the child sees EOF.
-        stdin.fileHandleForWriting.write(payload)
-        try? stdin.fileHandleForWriting.close()
-
-        // Drain stdout on a background queue so a big write can't deadlock the pipe.
-        var outData = Data()
-        let readGroup = DispatchGroup()
-        readGroup.enter()
-        DispatchQueue.global().async {
-            outData = stdout.fileHandleForReading.readDataToEndOfFile()
-            readGroup.leave()
-        }
-
-        let deadline = DispatchTime.now() + .milliseconds(timeoutMs)
-        if readGroup.wait(timeout: deadline) == .timedOut {
-            proc.terminate()                            // SIGTERM
-            usleep(50_000)
-            if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
-            errReader.readabilityHandler = nil
-            NSLog("[plugins] \(plugin.id): timed out after \(timeoutMs)ms — killed")
-            return nil
-        }
-        proc.waitUntilExit()
-        errReader.readabilityHandler = nil
-        guard proc.terminationStatus == 0 else {
-            NSLog("[plugins] \(plugin.id): exited \(proc.terminationStatus)")
-            return nil
-        }
-        guard let resp = try? PluginCoder.decoder.decode(SuggestResponse.self, from: outData) else {
-            NSLog("[plugins] \(plugin.id): stdout is not a valid SuggestResponse")
-            return nil
-        }
-        return resp
+        PluginProcess.run(plugin, request: request, as: SuggestResponse.self,
+                          timeoutMs: timeoutMs, onProgress: onProgress)
     }
 
     // MARK: - Merge / rank

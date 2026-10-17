@@ -36,7 +36,8 @@ final class QLKeyView: NSView, QLPreviewPanelDataSource, QLPreviewPanelDelegate 
     // Data source
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { urls.count }
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
-        urls[index] as NSURL
+        QuickLookCache.noteHandoff(urls[index])
+        return urls[index] as NSURL
     }
 }
 

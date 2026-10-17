@@ -390,9 +390,11 @@ func syncIndex(items: [LibraryItem], encoder: ClipEncoder, progress: (Int, Int) 
     // today's library list — e.g. a removed watched folder — keeps its row so
     // re-adding the folder costs nothing).
     let incoming = Set(items.map(\.path))
+    var forgotten: [Int] = []
     for path in meta.images.keys where !incoming.contains(path) && !fm.fileExists(atPath: path) {
-        meta.images.removeValue(forKey: path)
+        if let row = meta.images.removeValue(forKey: path)?.row, row >= 0 { forgotten.append(row) }
     }
+    zeroRows(forgotten, rowBytes: meta.dim * 4, in: binURL)
 
     let todo = items.filter { it in
         guard let rec = meta.images[it.path] else { return true }
@@ -464,6 +466,20 @@ func syncIndex(items: [LibraryItem], encoder: ClipEncoder, progress: (Int, Int) 
         progress(done, todo.count)
     }
     compactIfNeeded()
+}
+
+/// Overwrite rows of a flat Float32 blob with zeros, in place. A dead row is
+/// still an embedding of its image; forgetting the path alone isn't enough.
+func zeroRows(_ rows: [Int], rowBytes: Int, in url: URL) {
+    guard !rows.isEmpty, rowBytes > 0, let fh = try? FileHandle(forUpdating: url) else { return }
+    defer { try? fh.close() }
+    let size = (try? fh.seekToEnd()) ?? 0
+    let zeros = Data(count: rowBytes)
+    for row in rows where row >= 0 && UInt64((row + 1) * rowBytes) <= size {
+        try? fh.seek(toOffset: UInt64(row * rowBytes))
+        fh.write(zeros)
+    }
+    try? fh.synchronize()
 }
 
 /// Rewrite clip.bin without dead rows once they're more than a fifth of it.

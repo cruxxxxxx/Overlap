@@ -4,7 +4,7 @@
 
 # Overlap
 
-**Tag and query any file with native macOS Finder tags — boolean/Venn queries, on-device semantic search, batch workflows, and content-based suggestions.**
+**Tag and query any file with native macOS Finder tags — boolean/Venn queries, on-device semantic search, mood boards, connected services like Are.na, and content-based suggestions.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 &nbsp;![macOS 13+](https://img.shields.io/badge/macOS-13%2B-black)
@@ -41,7 +41,9 @@ Overlap reads and writes real macOS tags (`com.apple.metadata:_kMDItemUserTags`)
 - **Tag suggestions** — content-based suggestions from a plugin extension point (see [Plugins](#plugins)).
 - **Semantic search** — press ⌘F, type "girl with spiral hair", hit ⏎ and get ranked matches from every image in your scope and watched folders, tagged or not. Combine it with the tag query to narrow by relevance. Powered by the bundled MobileCLIP plugin; it downloads ~200 MB of Apple's Core ML models the first time it runs, then everything stays on-device.
 - **Export results as a folder** (⌘⇧E) — turn any query (tags, search, or both) into a real Finder folder for upload dialogs and other apps. Files are APFS copy-on-write clones by default (instant, no extra disk until edited) or hard links; a `.overlap-query.json` manifest records the query that produced it.
-- **Hidden tags** — passcode-gate sensitive tags; per-tag default include/exclude.
+- **Mood boards** — turn any query into a free-form canvas in its own window: drag, resize, align and snap tiles; add notes, labels and boxes; pull a color palette from the images; export as an image or a folder. Boards remember their query, so **Refresh** adds new matches (files you removed stay off).
+- **Connected services** — browse, import and sync collections from external image services, and send files back; ships with **Are.na**. Explore your feed, followed channels and any channel by link, pick individual blocks or import whole channels (tagged `arena/<Channel>`, stored as real files), link a board to a channel and sync both ways, or publish a board as a new channel. Tokens stay in the keychain; hidden files never leave your Mac, and every send is confirmed.
+- **Hidden tags** — passcode- or Touch ID-gated sensitive tags with per-tag default include/exclude, auto-lock, and an optional **encrypted vault** (AES-256 disk image) so hidden files are unreadable outside Overlap.
 - **Undo/redo** across every mutation (⌘Z / ⌘⇧Z), plus Stats, Fix Extension, Reveal, Export, and drag-out to other apps.
 
 ## Install
@@ -80,10 +82,11 @@ Overlap runs unsandboxed so it can read and write Finder tags across your folder
 
 ## Plugins
 
-Tag suggestions and semantic search come from an **out-of-process plugin system** — standalone executables, in any language, discovered at runtime. Overlap pipes a JSON request to a plugin's stdin and reads suggestions (or ranked search hits) from stdout, so model logic ships separately from the app. Two plugins are bundled:
+Tag suggestions, semantic search and connected services come from an **out-of-process plugin system** — standalone executables, in any language, discovered at runtime. Overlap pipes a JSON request to a plugin's stdin and reads the answer from stdout, so model and service logic ship separately from the app, which knows nothing about any particular service. Three plugins are bundled:
 
-- **overlap-suggest** — Apple Vision: visual similarity, face identities, scene labels, OCR, fused with your own tag co-occurrence.
-- **overlap-clip** — MobileCLIP-S2 text→image search over every image in scope (`capabilities: ["search"]`).
+- **overlap-suggest** (Tag Suggestions) — Apple Vision: visual similarity, face identities, scene labels, OCR, fused with your own tag co-occurrence.
+- **overlap-clip** (Search) — MobileCLIP-S2 text→image search over every image in scope.
+- **overlap-arena** (Connected Services) — Are.na: browse, import, sync, send, and publish channels.
 
 → **[How to write a plugin](docs/PLUGINS.md).**
 

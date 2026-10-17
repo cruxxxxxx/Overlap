@@ -1,0 +1,66 @@
+{
+  "name": "Are.na",
+  "id": "com.overlap.arena",
+  "version": "0.1.0",
+  "protocolVersion": 1,
+  "exec": "overlap-arena",
+  "handles": [
+    "*"
+  ],
+  "capabilities": [
+    "source"
+  ],
+  "batch": true,
+  "wantsKnownTags": false,
+  "wantsLibrary": false,
+  "timeoutMs": 300000,
+  "source": {
+    "displayName": "Are.na",
+    "collectionNoun": "channel",
+    "tagPrefix": "arena",
+    "canPush": true,
+    "canCreateCollection": true,
+    "visibilities": [
+      {
+        "id": "private",
+        "label": "Private",
+        "help": "Only you and collaborators",
+        "audience": 0
+      },
+      {
+        "id": "closed",
+        "label": "Closed",
+        "help": "Anyone can view; only you and collaborators add",
+        "audience": 1
+      },
+      {
+        "id": "public",
+        "label": "Public",
+        "help": "Anyone can view and add",
+        "audience": 2
+      }
+    ],
+    "canEditCollection": true
+  },
+  "secrets": [
+    {
+      "key": "token",
+      "label": "Personal access token",
+      "help": "Give it write scope to send files.",
+      "url": "https://www.are.na/settings/oauth"
+    }
+  ],
+  "settings": [
+    {
+      "key": "maxFileMB",
+      "type": "number",
+      "label": "Max attachment size (MB)",
+      "section": "Import",
+      "min": 5,
+      "max": 500,
+      "step": 5,
+      "default": 100,
+      "help": "Larger attachments are skipped when importing"
+    }
+  ]
+}

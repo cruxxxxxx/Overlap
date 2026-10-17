@@ -222,8 +222,9 @@ struct ResultsGridView: View {
                 Text("Off")
             }
             Divider()
-            ForEach(PluginRegistry.discover().filter { !store.disabledPluginIDs.contains($0.id) },
-                    id: \.id) { p in
+            ForEach(PluginRegistry.discover().filter {
+                $0.supports("suggest") && !store.disabledPluginIDs.contains($0.id)
+            }, id: \.id) { p in
                 Button {
                     store.setGroupPlugin(p.id)
                 } label: {
@@ -252,9 +253,9 @@ struct ResultsGridView: View {
     private var suggestionSourcesPopover: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Suggestion sources").font(.caption).foregroundStyle(.secondary)
-            let plugins = PluginRegistry.discover()
+            let plugins = PluginRegistry.discover().filter { $0.supports("suggest") }
             if plugins.isEmpty {
-                Text("No plugins installed").font(.caption).foregroundStyle(.tertiary)
+                Text("No suggestion plugins installed").font(.caption).foregroundStyle(.tertiary)
             }
             ForEach(plugins, id: \.id) { p in
                 Toggle(isOn: sourceEnabledBinding(p.id)) {
@@ -900,7 +901,8 @@ enum QuickLookOpener {
 
         func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { urls.count }
         func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
-            urls[index] as NSURL
+            QuickLookCache.noteHandoff(urls[index])
+            return urls[index] as NSURL
         }
     }
 }

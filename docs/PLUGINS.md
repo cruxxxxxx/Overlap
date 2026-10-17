@@ -1,12 +1,18 @@
-# Writing an Overlap suggestion plugin
+# Writing an Overlap plugin
 
-Overlap has two extension points: **tag suggestions** and **semantic search**
-(see [Search plugins](#search-plugins-capabilities-search)). A plugin is a
-standalone executable — in **any language** — that Overlap runs to suggest tags
-for the selected files (or rank files for a query). Nothing links against the
-app; plugins ship and update independently.
+Overlap has three extension points:
 
-Today Overlap includes one reference plugin (`plugins/folderkind/`). This page
+- **Tag suggestions** — suggest tags for the selected files (the default).
+- **Semantic search** — rank files for a text query
+  (see [Search plugins](#search-plugins-capabilities-search)).
+- **Connected services** — pull files from, and push files to, an external image
+  or web service (see [Connected-service plugins](#connected-service-plugins-capabilities-source)).
+
+A plugin is a standalone executable — in **any language** — that Overlap runs as
+a child process. Nothing links against the app; plugins ship and update
+independently. The Plugins menu groups installed plugins by these three kinds.
+
+Overlap ships three plugins (see [Bundled plugins](#bundled-plugins)). This page
 is how to write your own.
 
 ---
@@ -199,14 +205,95 @@ encoders, downloaded on first use.
 
 ---
 
+## Connected-service plugins (`capabilities: ["source"]`)
+
+A connected service is an external image or web service the user keeps
+collections on. Overlap stays unaware of which service it is: it only knows
+**collections** (a board, an album…) and **items** (a remote thing that becomes a
+local file). Every network call, credential and rate limit lives in the plugin.
+
+The process model is the same as above, but the request carries an `op` and the
+response fills only that op's fields. The full wire types are in
+[`Sources/SourceContract.swift`](../Sources/SourceContract.swift).
+
+### Manifest additions
+
+```json
+{
+  "capabilities": ["source"],
+  "source": {
+    "displayName": "My Service",
+    "collectionNoun": "board",
+    "tagPrefix": "myservice",
+    "canPush": true,
+    "canCreateCollection": true,
+    "canEditCollection": true,
+    "visibilities": [
+      { "id": "secret", "label": "Secret", "help": "Only you", "audience": 0 },
+      { "id": "public", "label": "Public", "help": "Anyone", "audience": 1 }
+    ]
+  },
+  "secrets": [
+    { "key": "token", "label": "Access token", "help": "…", "url": "https://…/settings" }
+  ]
+}
+```
+
+- `tagPrefix`: pulled files are tagged `<tagPrefix>/<Collection Title>`, and land in
+  `<library>/<displayName>/<Collection Title>/`.
+- `visibilities`: the service's own words. `audience` orders them (0 = only the
+  owner); the host asks for confirmation whenever a change raises it, and warns
+  before sending to any collection with `audience > 0`.
+- `secrets`: Overlap stores them in the login keychain and sends each plugin only
+  its own, as `request.secrets`. They never go to UserDefaults or `settings`.
+
+### Ops
+
+| `op` | request fields | response fields |
+|---|---|---|
+| `status` | `secrets` | `account { authenticated, name?, url?, canWrite?, browseScopes? }` |
+| `collections` | — | `collections` (the user's own) |
+| `resolve` | `collection` = a pasted link, slug or id | `collections: [one]` |
+| `pull` | `collection`, `cursor`, `since`, `stagingDir`, `knownIds` | `items`, `nextCursor` |
+| `browse` | `scope` (a `browseScopes` id or `"collection"`), `collection`, `query`, `cursor` | `collections`, `items` (with `previewURL`, no downloads), `nextCursor` |
+| `fetch` | `remoteIds`, `stagingDir` | `items` (downloaded) |
+| `related` | `remoteId` (collections an item is in) or `collection` (its owner's others) | `collections` |
+| `push` | `collection`, `items: [{ path, title, remoteId? }]` | `pushed: [{ path, remoteId?, url?, error? }]` |
+| `createCollection` | `title`, `visibility`, `description` | `collections: [created]` |
+| `updateCollection` | `collection`, `title?`, `visibility?`, `description?` | `collections: [updated]` |
+
+Any op may answer `{ "error": "…" }` (shown to the user) or
+`{ "retryAfter": seconds }` (the host waits and calls again — only for idempotent
+ops; a half-done `push` should report per-item errors instead).
+
+Rules the host enforces, so plugins don't have to:
+
+- **Downloads** must be written inside `stagingDir`; anything else is ignored. The
+  host moves files into the library, never overwriting, and deletes the staging dir.
+- **`knownIds`** lists remote ids already on disk: return them in `pull`, but don't
+  download them again.
+- **Origin** is written on each file as the `com.overlap.origin` extended attribute
+  (plus Finder's *Where from*), so re-syncs, cross-collection dedupe and
+  connect-instead-of-upload need no index. A `push` item with `remoteId` set is
+  already on the service: connect it rather than upload.
+- **Privacy**: hidden-tag files, vault files and private boards are filtered out
+  before a plugin sees any path, and every push is confirmed by the user.
+- **Browse scopes** come from `status`, so a plugin can offer a scope only when the
+  account supports it (e.g. a paid-tier search endpoint).
+
+Start from [`scripts/fixtures/mocksource/main.swift`](../scripts/fixtures/mocksource/main.swift),
+a fake service backed by a folder on disk; `scripts/test-sources.swift` runs the
+whole pipeline against it headlessly.
+
+---
+
 ## Bundled plugins
 
 | plugin | what it does | library? |
 |---|---|---|
 | `plugins/overlap-suggest/` | **the shipping suggester** — FeaturePrint kNN + face identities + classifier labels + OCR + face-quality gating + aesthetics, fused (noisy-OR) with co-occurrence rerank/mutex learned from your tags; declares tunables via manifest `settings` (rendered in Plugins ▸ Plugin Settings…) | yes |
 | `plugins/overlap-clip/` | **semantic search** (`capabilities: ["search"]`) — MobileCLIP-S2 text→image search over every image in the scope + watched folders; ~200 MB of Core ML models fetched on first use into the plugin cache | yes |
-| `plugins/folderkind/` | folder name + file kind + neighbor tags — dependency-free reference/template (not installed by default) | yes |
-| `plugins/mockcluster/` | deterministic fake clusters — exercises the group-chip UX with no ML (not installed by default) | no |
+| `plugins/overlap-arena/` | **connected service** (`capabilities: ["source"]`) — Are.na: browse, import and sync channels, send files, create and publish channels | no |
 
 (The earlier `visionknn` and `facecluster` plugins were merged into `overlap-suggest`,
 which migrates their caches automatically; their dirs are removed.)
@@ -217,5 +304,5 @@ Build and install all of them:
 bash plugins/install.sh
 ```
 
-Read `folderkind/main.swift` as a starting template; `visionknn` and `facecluster`
-show the real embed/cluster patterns with Apple Vision.
+Read `overlap-suggest/main.swift` for the Apple Vision embed/cluster patterns,
+`overlap-clip` for a search plugin, and `overlap-arena` for a connected service.

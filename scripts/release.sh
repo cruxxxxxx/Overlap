@@ -37,12 +37,12 @@ cp -R "$OUT/dd/Build/Products/Release/Overlap.app" "$APP"
 rm -rf "$OUT/dd"
 
 echo "-- bundle built-in plugins --"
-# overlap-suggest ships inside the app (Contents/PlugIns — PluginRegistry scans
+# overlap-suggest, overlap-clip and overlap-arena ship inside the app (Contents/PlugIns — PluginRegistry scans
 # builtInPlugInsURL). The user Plugins dir still overrides by id, so a newer
 # user-installed copy wins over the bundled one.
 PLUGINS_DST="$APP/Contents/PlugIns"
 mkdir -p "$PLUGINS_DST"
-for name in overlap-suggest overlap-clip; do
+for name in overlap-suggest overlap-clip overlap-arena; do
     src="plugins/$name"
     exec_name=$(/usr/bin/python3 -c "import json;print(json.load(open('$src/manifest.json'))['exec'])")
     echo "   building $name"

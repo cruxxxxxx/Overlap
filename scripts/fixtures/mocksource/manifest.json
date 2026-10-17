@@ -1,0 +1,56 @@
+{
+  "name": "Mock Source",
+  "id": "com.overlap.mocksource",
+  "version": "0.1.0",
+  "protocolVersion": 1,
+  "exec": "mocksource",
+  "handles": [
+    "*"
+  ],
+  "capabilities": [
+    "source"
+  ],
+  "batch": true,
+  "wantsKnownTags": false,
+  "wantsLibrary": false,
+  "timeoutMs": 20000,
+  "source": {
+    "displayName": "Mock Source",
+    "collectionNoun": "folder",
+    "tagPrefix": "mock",
+    "canPush": true,
+    "canCreateCollection": true,
+    "visibilities": [
+      {
+        "id": "private",
+        "label": "Private",
+        "audience": 0
+      },
+      {
+        "id": "public",
+        "label": "Public",
+        "audience": 1
+      }
+    ]
+  },
+  "secrets": [
+    {
+      "key": "token",
+      "label": "Any token",
+      "help": "Any non-empty value signs in"
+    }
+  ],
+  "settings": [
+    {
+      "key": "pageSize",
+      "type": "number",
+      "label": "Items per page",
+      "section": "Paging",
+      "min": 1,
+      "max": 50,
+      "step": 1,
+      "default": 2,
+      "help": "Small pages exercise the host's cursor loop"
+    }
+  ]
+}

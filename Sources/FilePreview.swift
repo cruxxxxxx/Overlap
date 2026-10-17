@@ -155,11 +155,15 @@ struct QuickLookPreview: NSViewRepresentable {
 
     func makeNSView(context: Context) -> QLPreviewView {
         let view = QLPreviewView(frame: .zero, style: .normal) ?? QLPreviewView()
+        QuickLookCache.noteHandoff(url)
         view.previewItem = url as NSURL
         return view
     }
 
     func updateNSView(_ view: QLPreviewView, context: Context) {
-        if (view.previewItem as? URL) != url { view.previewItem = url as NSURL }
+        if (view.previewItem as? URL) != url {
+            QuickLookCache.noteHandoff(url)
+            view.previewItem = url as NSURL
+        }
     }
 }

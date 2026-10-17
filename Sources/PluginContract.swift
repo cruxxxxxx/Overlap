@@ -144,8 +144,10 @@ struct PluginManifest: Codable {
     var timeoutMs = 5000
     var settings: [PluginSetting]? = nil   // tunables the host renders + injects
     // Optional (not defaulted) so every existing manifest keeps decoding.
-    var capabilities: [String]? = nil      // "suggest" (default) and/or "search"
+    var capabilities: [String]? = nil      // "suggest" (default), "search", and/or "source"
     var queryTimeoutMs: Int? = nil         // search plugins: per-query budget (index uses timeoutMs)
+    var source: SourceInfo? = nil          // source plugins: how the host presents the provider
+    var secrets: [PluginSecret]? = nil     // credentials the host keeps in the keychain
 }
 
 /// A manifest paired with its resolved on-disk location.
