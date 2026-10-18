@@ -6,19 +6,31 @@ import SwiftUI
 struct PreviewPane: View {
     let item: FileItem?
     @State private var typeRows: [(String, String)] = []
+    @State private var media: OriginRecord?
 
     var body: some View {
         Group {
             if let item {
                 let provider = FilePreviewRegistry.provider(for: item)
                 VStack(spacing: 8) {
-                    provider.preview(item)
-                        .id(item.id)   // recreate so the preview follows selection
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if let embed = media?.embed {
+                        EmbedPlayer(html: embed, pageURL: media?.url.flatMap(URL.init(string:)))
+                            .id(item.id)
+                            .aspectRatio(16 / 9, contentMode: .fit)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        provider.preview(item)
+                            .id(item.id)   // recreate so the preview follows selection
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                     infoPanel(item)
                 }
                 .padding(10)
-                .task(id: item.id) { typeRows = await provider.info(item) }
+                .task(id: item.id) {
+                    let url = item.url
+                    media = await Task.detached(priority: .userInitiated) { FileOrigin.media(of: url) }.value
+                    typeRows = await provider.info(item)
+                }
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: "doc").font(.system(size: 40)).foregroundStyle(.tertiary)

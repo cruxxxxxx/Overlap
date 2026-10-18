@@ -174,9 +174,24 @@ enum PluginCoder {
         e.dateEncodingStrategy = .iso8601
         return e
     }()
+    private static let wholeSeconds = ISO8601DateFormatter()
+    private static let fractionalSeconds: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    /// ISO 8601 with or without fractional seconds (services send both).
     static let decoder: JSONDecoder = {
         let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
+        d.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            if let date = wholeSeconds.date(from: text) ?? fractionalSeconds.date(from: text) {
+                return date
+            }
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                    debugDescription: "Not an ISO 8601 date: \(text)"))
+        }
         return d
     }()
 }

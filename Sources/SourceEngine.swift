@@ -33,6 +33,8 @@ struct PullOutcome {
     var tags: Set<String> = []
     var added: [URL] = []
     var retagged: [URL] = []
+    /// Every handled item's local file, changed or not, by remote id.
+    var files: [String: URL] = [:]
     var skipped = 0
     var error: String?
 }
@@ -75,6 +77,7 @@ enum SourceEngine {
                 continue
             }
             if let message = response.error {
+                NSLog("[plugins] %@: %@ failed — %@", plugin.id, request.op.rawValue, message)
                 return .failure(.service(message))
             }
             return .success(response)
@@ -184,16 +187,20 @@ enum SourceEngine {
 
     /// One remote item → a tagged local file (or, when it's already here, the
     /// existing file gains this collection's tag and origin).
-    nonisolated private static func ingest(_ item: SourceItem, collectionID: String, tag: String, plugin: String,
+    nonisolated private static func ingest(_ item: SourceItem, collectionID: String, tag: String?, plugin: String,
                                            staging: URL, into destination: URL, includeTextAndLinks: Bool,
                                            known: inout [String: URL], outcome: inout PullOutcome) {
         let record = OriginRecord(plugin: plugin, remoteId: item.remoteId, collection: collectionID,
-                                  url: item.url, updatedAt: item.updatedAt)
-        outcome.tags.insert(tag)
+                                  url: item.url, updatedAt: item.updatedAt, kind: item.kind,
+                                  source: item.sourceURL, embed: item.embedHTML)
+        if let tag {
+            outcome.tags.insert(tag)
+        }
         if let existing = known[item.remoteId] {
             if adopt(existing, record: record, tag: tag) {
                 outcome.retagged.append(existing)
             }
+            outcome.files[item.remoteId] = existing
             return
         }
         guard let file = materialize(item, staging: staging, into: destination,
@@ -201,10 +208,13 @@ enum SourceEngine {
             outcome.skipped += 1
             return
         }
-        try? TagIO.setTags(TagIO.tags(of: file) + [tag], on: file)
+        if let tag {
+            try? TagIO.setTags(TagIO.tags(of: file) + [tag], on: file)
+        }
         FileOrigin.add(record, to: file)
         FileOrigin.setWhereFrom([item.url, item.sourceURL].compactMap { $0 }, on: file)
         known[item.remoteId] = file
+        outcome.files[item.remoteId] = file
         outcome.added.append(file)
     }
 
@@ -222,9 +232,11 @@ enum SourceEngine {
     }
 
     /// Download only the chosen items. Each lands in its collection's default
-    /// folder with that collection's tag; ones already here just gain the tag.
+    /// folder, with that collection's tag when `tagCollections`; ones already
+    /// here just gain the tag.
     nonisolated static func save(_ picks: [Pick], plugin: DiscoveredPlugin, scope: URL,
                                  secrets: [String: String], settings: [String: SettingValue],
+                                 tagCollections: Bool = true,
                                  onProgress: (@Sendable (String) -> Void)? = nil) async -> PullOutcome {
         var outcome = PullOutcome()
         guard let info = plugin.manifest.source else {
@@ -240,11 +252,11 @@ enum SourceEngine {
         var known = knownFiles(plugin: plugin.id, roots: [providerFolder(scope: scope, info: info)])
         let collectionByItem = Dictionary(picks.map { ($0.item.remoteId, $0.collection) },
                                           uniquingKeysWith: { first, _ in first })
-        func target(_ remoteId: String) -> (SourceCollection, URL, String) {
+        func target(_ remoteId: String) -> (SourceCollection, URL, String?) {
             let collection = collectionByItem[remoteId] ?? savedCollection()
             return (collection,
                     defaultDestination(scope: scope, info: info, collectionTitle: collection.title),
-                    tag(for: info, collectionTitle: collection.title))
+                    tagCollections ? tag(for: info, collectionTitle: collection.title) : nil)
         }
 
         // Already here: no download, just this collection's tag.
@@ -279,15 +291,16 @@ enum SourceEngine {
 
     /// A file already pulled (maybe for another collection): give it this
     /// collection's tag and origin. True when anything changed.
-    nonisolated private static func adopt(_ file: URL, record: OriginRecord, tag: String) -> Bool {
+    nonisolated private static func adopt(_ file: URL, record: OriginRecord, tag: String?) -> Bool {
         let hasRecord = FileOrigin.records(of: file).contains {
             $0.plugin == record.plugin && $0.collection == record.collection
         }
         let tags = TagIO.tags(of: file)
-        if hasRecord && tags.contains(tag) {
+        let needsTag = tag.map { !tags.contains($0) } ?? false
+        if hasRecord && !needsTag {
             return false
         }
-        if !tags.contains(tag) {
+        if needsTag, let tag {
             try? TagIO.setTags(tags + [tag], on: file)
         }
         if !hasRecord {

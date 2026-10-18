@@ -4,6 +4,7 @@ import Quartz
 
 struct ResultsGridView: View {
     @EnvironmentObject var store: TagStore
+    @EnvironmentObject var remote: RemoteBrowseModel
     @State private var thumbSize: CGFloat = 150
     @State private var showNewTag = false
     @State private var newTagName = ""
@@ -34,7 +35,13 @@ struct ResultsGridView: View {
                 .padding(.horizontal, 12).padding(.vertical, 4)
                 Divider()
             }
-            if store.mode == .queue { queueBar } else { QueryBar(thumbSize: $thumbSize) }
+            if store.mode == .queue {
+                queueBar
+            } else if store.mode == .remote {
+                RemoteBar(thumbSize: $thumbSize)
+            } else {
+                QueryBar(thumbSize: $thumbSize)
+            }
             Divider()
             if store.results.isEmpty {
                 emptyState
@@ -383,7 +390,7 @@ struct ResultsGridView: View {
         // the text-field pass-through. Handled here, not as a menu shortcut, so
         // it can't collide with Edit ▸ Find.
         if event.keyCode == 3, event.modifierFlags.contains(.command),
-           !event.modifierFlags.contains(.shift), store.searchAvailable, store.mode != .queue {
+           !event.modifierFlags.contains(.shift), store.searchAvailable, store.mode != .queue, store.mode != .remote {
             store.requestSearchFocus()
             return nil
         }
@@ -418,6 +425,12 @@ struct ResultsGridView: View {
             }
         }
 
+        // ⌘S saves remote previews to the library.
+        if store.mode == .remote, event.keyCode == 1, event.modifierFlags.contains(.command) {
+            remote.save(store.selectedURLs())
+            return nil
+        }
+
         // ⌘⌫ moves the selection to the Trash.
         if event.keyCode == 51, event.modifierFlags.contains(.command) {
             store.trash(store.selectedURLs())
@@ -446,7 +459,10 @@ struct ResultsGridView: View {
                 Text(item.name)
                     .font(.caption).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
-                if item.tags.isEmpty {
+                if store.mode == .remote {
+                    Text(remote.isSaved(item.url) ? "in your library" : "not saved")
+                        .font(.caption).foregroundStyle(.tertiary)
+                } else if item.tags.isEmpty {
                     Text("no tags").font(.caption).foregroundStyle(.tertiary)
                 }
                 Spacer()
@@ -457,6 +473,7 @@ struct ResultsGridView: View {
                                 store.removeTag(tag, from: [item.url])
                             } label: {
                                 HStack(spacing: 3) {
+                                    TagColorDot(tag: tag)
                                     Text(tag).font(.caption)
                                     Image(systemName: "xmark").font(.system(size: 7, weight: .bold))
                                 }
@@ -511,11 +528,13 @@ struct ResultsGridView: View {
                         ForEach(store.results) { item in
                             ThumbnailCell(item: item, size: thumbSize,
                                           selected: store.selection.contains(item.id))
+                                .overlay(alignment: .topTrailing) { savedBadge(item) }
                                 .id(item.id)
                                 .onTapGesture(count: 2) { handleOpen(item) }
                                 .onTapGesture { handleClick(item) }
                                 .onDrag { NSItemProvider(object: item.url as NSURL) }
                                 .contextMenu { contextMenu(for: item) }
+                                .onAppear { loadMoreIfLast(item) }
                         }
                     }
                     .padding(12)
@@ -533,6 +552,24 @@ struct ResultsGridView: View {
             .onChange(of: thumbSize) { _ in store.columnsHint = computeColumns(geo.size.width) }
         }
         .tutorialAnchor(.grid)
+    }
+
+    /// Remote previews already saved to the library get a check.
+    @ViewBuilder
+    private func savedBadge(_ item: FileItem) -> some View {
+        if store.mode == .remote && remote.isSaved(item.url) {
+            Image(systemName: "checkmark.circle.fill")
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, .green)
+                .padding(5)
+                .help("In your library")
+        }
+    }
+
+    private func loadMoreIfLast(_ item: FileItem) {
+        if store.mode == .remote && item.id == store.results.last?.id {
+            remote.loadMore()
+        }
     }
 
     private func computeColumns(_ width: CGFloat) -> Int {
@@ -715,7 +752,9 @@ struct ResultsGridView: View {
 
     private var emptyState: some View {
         VStack(spacing: 8) {
-            if store.mode == .queue {
+            if store.mode == .remote {
+                remoteEmptyState
+            } else if store.mode == .queue {
                 Image(systemName: "tray").font(.system(size: 40)).foregroundStyle(.tertiary)
                 Text("Queue empty")
                     .foregroundStyle(.secondary)
@@ -749,6 +788,27 @@ struct ResultsGridView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    @ViewBuilder
+    private var remoteEmptyState: some View {
+        let name = remote.info?.displayName ?? "the service"
+        if remote.loading || remote.stillLoadingPreviews {
+            ProgressView()
+        } else if remote.signedOut {
+            Image(systemName: "person.crop.circle.badge.questionmark").font(.system(size: 40)).foregroundStyle(.tertiary)
+            Text("Not signed in to \(name)").foregroundStyle(.secondary)
+            Text("Sources ▸ Connected Services…").font(.caption).foregroundStyle(.tertiary)
+        } else if let error = remote.error {
+            Image(systemName: "exclamationmark.triangle").font(.system(size: 40)).foregroundStyle(.tertiary)
+            Text(error).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        } else if case .scope(let scope, let query)? = remote.location, scope.takesQuery == true, query.isEmpty {
+            Image(systemName: "magnifyingglass").font(.system(size: 40)).foregroundStyle(.tertiary)
+            Text("Search \(name)").foregroundStyle(.secondary)
+        } else {
+            Image(systemName: "square.grid.2x2").font(.system(size: 40)).foregroundStyle(.tertiary)
+            Text("Nothing here").foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: Interaction
 
     /// `within` scopes shift-click ranges (e.g. to one suggestion section);
@@ -778,6 +838,13 @@ struct ResultsGridView: View {
 
     /// Double-click: in the queue, step into a folder; otherwise Quick Look.
     private func handleOpen(_ item: FileItem) {
+        if store.mode == .remote && remote.open(item.url) {
+            return
+        }
+        if let media = FileOrigin.media(of: item.url), media.opensSource, let link = media.sourceLink {
+            NSWorkspace.shared.open(link)
+            return
+        }
         if store.mode == .queue && item.kind == .folder {
             store.enterQueueFolder(item.url)
         } else {
@@ -807,6 +874,18 @@ struct ResultsGridView: View {
 
     @ViewBuilder
     private func contextMenu(for item: FileItem) -> some View {
+        if store.mode == .remote {
+            RemoteItemMenu(url: item.url, targets: targetURLs(for: item))
+        } else {
+            libraryMenu(for: item)
+        }
+    }
+
+    @ViewBuilder
+    private func libraryMenu(for item: FileItem) -> some View {
+        if let media = FileOrigin.media(of: item.url), let link = media.sourceLink {
+            Button(media.openLabel) { NSWorkspace.shared.open(link) }
+        }
         Button("Quick Look") {
             store.selection = store.selection.contains(item.id) ? store.selection : [item.id]
             QuickLookOpener.open(targetURLs(for: item))

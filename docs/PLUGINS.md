@@ -280,6 +280,22 @@ Rules the host enforces, so plugins don't have to:
   before a plugin sees any path, and every push is confirmed by the user.
 - **Browse scopes** come from `status`, so a plugin can offer a scope only when the
   account supports it (e.g. a paid-tier search endpoint).
+- **Browsing** happens in Overlap's main window: the sidebar lists each service's
+  scopes and synced collections, and `browse` results fill the grid. Each item's
+  `previewURL` is cached under `~/Library/Caches/Overlap/Remote` (500 MB cap), so
+  give it an image big enough for Quick Look (~1200 px). Items without one show as
+  text (`text`) or a link (`sourceURL`/`url`).
+- **Media**: give video and other embeddable items `embedHTML` (the service's
+  iframe) and `sourceURL` (the page). The preview pane plays it. Only the first
+  iframe's https `src` is kept, in a sandboxed frame with no stored data.
+  Double-click opens `sourceURL`. On `fetch`/`pull`, return the item's picture as
+  its `file` so a saved video stays visual. Without a picture it becomes a link
+  file.
+- **Saving** an item (dragging it onto a tag or a board, or *Save to Library*)
+  calls `fetch` for it, and it lands in `<Collection>/` like a pull. A plain save
+  always adds the collection tag. When the user drags onto a tag, the collection tag
+  is added only if the plugin declares a bool setting `tagSavedWithCollection` and
+  the user turns it on.
 
 Start from [`scripts/fixtures/mocksource/main.swift`](../scripts/fixtures/mocksource/main.swift),
 a fake service backed by a folder on disk; `scripts/test-sources.swift` runs the

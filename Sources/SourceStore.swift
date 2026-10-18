@@ -273,6 +273,46 @@ final class SourceStore: ObservableObject {
         }
     }
 
+    /// Save picked items and wait for them: the local file of every pick that
+    /// made it, by remote id. Runs alongside any sync rather than waiting.
+    func saveNow(_ picks: [SourceEngine.Pick], plugin: DiscoveredPlugin,
+                 tagCollections: Bool) async -> [String: URL] {
+        guard let scope = tags?.scopeURL, !picks.isEmpty else {
+            return [:]
+        }
+        let secrets = secrets(for: plugin), settings = settings(for: plugin)
+        let ownsStatus = !busy
+        if ownsStatus {
+            start("Saving \(picks.count) from \(plugin.manifest.source?.displayName ?? plugin.manifest.name)…")
+        }
+        let outcome = await Task.detached {
+            await SourceEngine.save(picks, plugin: plugin, scope: scope, secrets: secrets,
+                                    settings: settings, tagCollections: tagCollections) { line in
+                Task { @MainActor [weak self] in
+                    if ownsStatus {
+                        self?.activity = line
+                    }
+                }
+            }
+        }.value
+        tags?.adoptSourceFiles(Array(outcome.files.values), tags: Array(outcome.tags))
+        if ownsStatus {
+            finish(error: outcome.error, message: "Saved \(outcome.files.count) to the library.")
+        } else if let error = outcome.error {
+            lastError = error
+        }
+        return outcome.files
+    }
+
+    /// Whether picks saved with another tag also get their collection's tag:
+    /// the plugin's `tagSavedWithCollection` setting (off unless declared on).
+    func tagsSavedWithCollection(_ plugin: DiscoveredPlugin) -> Bool {
+        if case .bool(let on)? = settings(for: plugin)["tagSavedWithCollection"] {
+            return on
+        }
+        return false
+    }
+
     /// Remote ids already in the library (any collection), for "saved" badges.
     func savedRemoteIds(_ plugin: DiscoveredPlugin) async -> Set<String> {
         guard let info = plugin.manifest.source, let scope = tags?.scopeURL else {

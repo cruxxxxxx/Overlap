@@ -150,6 +150,7 @@ struct QueryBar: View {
         }
         return HStack(spacing: 4) {
             Image(systemName: symbol).font(.system(size: 8, weight: .bold))
+            TagColorDot(tag: tag)
             Text(tag).font(.caption)
                 .strikethrough(role == .excluded)
             Button { store.clear(tag) } label: {

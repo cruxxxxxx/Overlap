@@ -51,6 +51,12 @@
       "step": 1,
       "default": 2,
       "help": "Small pages exercise the host's cursor loop"
+    },
+    {
+      "key": "tagSavedWithCollection",
+      "type": "bool",
+      "label": "Also tag saved items with their collection",
+      "default": false
     }
   ]
 }

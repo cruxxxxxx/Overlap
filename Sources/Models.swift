@@ -3,7 +3,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Which left-column mode is active.
-enum LibraryMode { case tags, queue, explore }
+/// `remote` shows items from a connected service: preview files in a cache
+/// that only become library files when tagged or saved.
+enum LibraryMode { case tags, queue, explore, remote }
 
 /// One section of the queue's "group by suggestions" view: a suggested tag and
 /// the (currently visible) files it covers. `suggestion == nil` is the trailing

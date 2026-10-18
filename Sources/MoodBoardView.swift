@@ -861,12 +861,14 @@ struct MoodBoardView: View {
         }
         let point = CGPoint(x: max(0, location.x / zoom), y: max(0, location.y / zoom))
         Task { @MainActor in
-            var paths: [String] = []
+            var urls: [URL] = []
             for provider in fileProviders {
                 if let url = await Self.loadFileURL(provider) {
-                    paths.append(VaultDisk.originalPath(of: url.path))
+                    urls.append(url)
                 }
             }
+            // Previews dragged in from a connected service are saved first.
+            let paths = await store.libraryURLs(for: urls).map { VaultDisk.originalPath(of: $0.path) }
             await boards.addFiles(paths, to: boardID, at: point, undo: undoManager)
         }
         return true

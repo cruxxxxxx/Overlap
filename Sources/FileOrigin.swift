@@ -10,6 +10,16 @@ struct OriginRecord: Codable, Hashable {
     let collection: String
     var url: String? = nil
     var updatedAt: Date? = nil
+    var kind: String? = nil
+    /// Where the item points (a video's page, a link's site).
+    var source: String? = nil
+    /// The service's player for it, as an iframe.
+    var embed: String? = nil
+
+    /// Media and links: double-click opens `source` rather than the file.
+    var opensSource: Bool {
+        (kind == "embed" || kind == "link") && source != nil
+    }
 }
 
 enum FileOrigin {
@@ -21,6 +31,12 @@ enum FileOrigin {
             return []
         }
         return (try? PluginCoder.decoder.decode([OriginRecord].self, from: data)) ?? []
+    }
+
+    /// The first record with a player, or one that opens its source.
+    static func media(of url: URL) -> OriginRecord? {
+        let all = records(of: url)
+        return all.first { $0.embed != nil } ?? all.first { $0.opensSource }
     }
 
     /// The remote id this file has on `plugin`, from any collection.

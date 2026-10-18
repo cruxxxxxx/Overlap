@@ -7,6 +7,7 @@ struct OverlapApp: App {
     @StateObject private var store = TagStore(scope: defaultScope)
     @StateObject private var boards = BoardStore()
     @StateObject private var sources = SourceStore()
+    @StateObject private var remote = RemoteBrowseModel()
 
     static var defaultScope: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -19,11 +20,13 @@ struct OverlapApp: App {
                 .environmentObject(store)
                 .environmentObject(boards)
                 .environmentObject(sources)
+                .environmentObject(remote)
                 .frame(minWidth: 900, minHeight: 560)
                 .background(MainWindowReader())
                 .onAppear {
                     boards.attach(to: store)
                     sources.attach(to: store)
+                    remote.attach(sources: sources, tags: store)
                 }
         }
         .commands {
@@ -89,16 +92,6 @@ struct OverlapApp: App {
             SourcesView()
                 .environmentObject(store)
                 .environmentObject(sources)
-        }
-
-        WindowGroup("Browse", id: "source-browser", for: String.self) { $pluginID in
-            if let pluginID {
-                SourceBrowserView(pluginID: pluginID)
-                    .environmentObject(store)
-                    .environmentObject(sources)
-                    .environmentObject(boards)
-                    .onAppear { boards.attach(to: store) }
-            }
         }
 
         WindowGroup("Board", id: "board", for: UUID.self) { $boardID in

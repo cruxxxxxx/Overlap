@@ -17,11 +17,12 @@ enum PluginProcess {
         guard let payload = try? PluginCoder.encoder.encode(request) else { return nil }
         guard let outData = runRaw(plugin, payload: payload, timeoutMs: timeoutMs,
                                    cancellable: cancellable, onProgress: onProgress) else { return nil }
-        guard let resp = try? PluginCoder.decoder.decode(Response.self, from: outData) else {
-            NSLog("[plugins] \(plugin.id): stdout is not a valid \(Response.self)")
+        do {
+            return try PluginCoder.decoder.decode(Response.self, from: outData)
+        } catch {
+            NSLog("[plugins] \(plugin.id): stdout is not a valid \(Response.self) — \(error)")
             return nil
         }
-        return resp
     }
 
     /// `cancellable`: kill the child when the calling task is cancelled. Off for
@@ -42,24 +43,23 @@ enum PluginProcess {
         // (e.g. "Building suggestion index… 300/4000") while it works; the last
         // line is surfaced in the UI. Draining also prevents a chatty plugin from
         // blocking on a full stderr pipe.
+        // Every line also goes to the system log (Console, filter "[plugins]").
         let errReader = stderr.fileHandleForReading
-        if let onProgress {
-            var buf = Data()
-            errReader.readabilityHandler = { h in
-                let chunk = h.availableData
-                guard !chunk.isEmpty else { return }
-                buf.append(chunk)
-                while let nl = buf.firstIndex(of: 0x0A) {
-                    let lineData = buf.subdata(in: buf.startIndex..<nl)
-                    buf.removeSubrange(buf.startIndex...nl)
-                    if let line = String(data: lineData, encoding: .utf8)?
-                        .trimmingCharacters(in: .whitespaces), !line.isEmpty {
-                        onProgress(line)
-                    }
+        let pluginID = plugin.id
+        var buf = Data()
+        errReader.readabilityHandler = { h in
+            let chunk = h.availableData
+            guard !chunk.isEmpty else { return }
+            buf.append(chunk)
+            while let nl = buf.firstIndex(of: 0x0A) {
+                let lineData = buf.subdata(in: buf.startIndex..<nl)
+                buf.removeSubrange(buf.startIndex...nl)
+                if let line = String(data: lineData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespaces), !line.isEmpty {
+                    NSLog("[plugins] %@: %@", pluginID, line)
+                    onProgress?(line)
                 }
             }
-        } else {
-            errReader.readabilityHandler = { h in _ = h.availableData }
         }
 
         do { try proc.run() } catch {

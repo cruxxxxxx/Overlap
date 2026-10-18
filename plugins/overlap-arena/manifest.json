@@ -61,6 +61,14 @@
       "step": 5,
       "default": 100,
       "help": "Larger attachments are skipped when importing"
+    },
+    {
+      "key": "tagSavedWithCollection",
+      "type": "bool",
+      "label": "Also tag saved blocks with their channel",
+      "section": "Saving",
+      "default": false,
+      "help": "When you drag a block onto a tag, also add arena/<channel>. Saving without a tag always adds it."
     }
   ]
 }

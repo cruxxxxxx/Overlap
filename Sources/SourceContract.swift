@@ -166,6 +166,7 @@ struct SourceItem: Codable, Hashable {
     var previewURL: String? = nil     // browse: a thumbnail the host may load directly
     var author: String? = nil
     var via: SourceCollection? = nil  // browse: the collection it was seen in (feed, search)
+    var embedHTML: String? = nil      // a player (an iframe) for video and other media
 }
 
 struct SourcePushResult: Codable, Hashable {

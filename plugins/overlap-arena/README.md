@@ -6,8 +6,12 @@ It speaks Are.na's REST API v3; Overlap itself knows nothing about Are.na.
 - **Sign in:** create a personal access token at
   <https://www.are.na/settings/oauth> (write scope to send or edit), paste it in
   *Sources ▸ Connected Services…*. It's kept in the login keychain.
-- **Browse:** Feed, Following, My Channels, any channel by link; Search appears for
-  Premium/Supporter accounts (Are.na's search endpoint is Premium-only).
+- **Browse:** in the main window, under *Connected Services* in the sidebar: Feed,
+  Following, My Channels, synced channels, any channel by link. *Search Channels* works
+  for everyone (Are.na's v2 search). Premium/Supporter accounts get *Search*
+  instead, which also finds blocks (v3 search is Premium-only). Drag
+  blocks onto a tag to save them with that tag; *Also tag saved blocks with their
+  channel* (Plugin Settings) adds `arena/<channel>` too.
 - **Import / sync:** whole channels or picked blocks. Images and attachments become
   files; text blocks `.md`, links and embeds `.webloc`. Files land in
   `<library>/Are.na/<Channel>/`, tagged `arena/<Channel>`.

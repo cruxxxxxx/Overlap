@@ -31,6 +31,9 @@ final class TagStore: ObservableObject {
     // Catalog
     @Published var tagTree: [TagNode] = []
     @Published var tagCounts: [String: Int] = [:]
+    /// Each tag's Finder color, read from the files themselves (never stored by
+    /// Overlap). Tags without a color are absent.
+    @Published private(set) var tagColors: [String: TagColor] = [:]
     @Published var isIndexing = false
     @Published var isScanning = false   // queue scan running off-main
 
@@ -221,6 +224,10 @@ final class TagStore: ObservableObject {
     /// Finder-style drill path. Empty = the watched folders; otherwise the queue
     /// shows the immediate contents of the last URL (so you can step deeper).
     @Published var queueDrill: [URL] = []
+    /// Remote mode's results, in the service's order. The files are previews
+    /// in a cache; `remoteHandler` turns them into library files on demand.
+    private var remoteItems: [FileItem] = []
+    weak var remoteHandler: RemoteResultsHandler?
     /// Folders the connected services fill and keep tagged themselves; the
     /// queue never lists them or anything inside. Asked at scan time so it
     /// follows the current library scope.
@@ -353,6 +360,7 @@ final class TagStore: ObservableObject {
                 self.catalogQuery.enableUpdates()
                 self.saveCache()
                 self.reconcileVault()
+                self.refreshTagColors()
                 // Catalog is loaded — build/refresh the plugins' persistent indexes
                 // in the background so the first Suggest isn't the slow one.
                 self.warmUpPlugins()
@@ -401,6 +409,69 @@ final class TagStore: ObservableObject {
         refreshVisible()
         saveCache()
         reconcileVault()   // a file tagged hidden in Finder goes into the vault
+        refreshTagColors()
+    }
+
+    // MARK: - Tag colors
+
+    func color(of tag: String) -> TagColor {
+        tagColors[tag] ?? .none
+    }
+
+    /// Read each tag's color from one file that carries it. One xattr read per
+    /// tag, off the main thread.
+    private func refreshTagColors() {
+        var sample: [String: URL] = [:]
+        for item in allItems {
+            for tag in item.tags where sample[tag] == nil {
+                sample[tag] = item.url
+            }
+        }
+        Task.detached(priority: .utility) { [weak self] in
+            var colors: [String: TagColor] = [:]
+            for (tag, url) in sample {
+                if let color = TagIO.color(of: tag, on: url), color != .none {
+                    colors[tag] = color
+                }
+            }
+            let found = colors
+            await MainActor.run {
+                guard let self else {
+                    return
+                }
+                if self.tagColors != found {
+                    self.tagColors = found
+                }
+                TagIO.rememberColors(found)
+            }
+        }
+    }
+
+    /// Recolor a tag on every file that has it, so Finder shows the same color.
+    func setColor(_ color: TagColor, for tag: String) {
+        let urls = allURLs(withTag: tag)
+        let before = tagColors[tag] ?? .none
+        guard color != before || urls.contains(where: { TagIO.color(of: tag, on: $0) != color }) else {
+            return
+        }
+        let previous = TagIO.setColor(color, of: tag, on: urls)
+        applyColor(color, to: tag)
+        push("Color “\(tag)”",
+             undo: { [weak self] in
+                 for (url, old) in previous {
+                     TagIO.setColor(old, of: tag, on: [url])
+                 }
+                 self?.applyColor(before, to: tag)
+             },
+             redo: { [weak self] in
+                 TagIO.setColor(color, of: tag, on: urls)
+                 self?.applyColor(color, to: tag)
+             })
+    }
+
+    private func applyColor(_ color: TagColor, to tag: String) {
+        tagColors[tag] = color == .none ? nil : color
+        TagIO.rememberColors(tagColors)
     }
 
     // MARK: - Catalog cache (instant launch)
@@ -841,7 +912,7 @@ final class TagStore: ObservableObject {
     /// Make `q` the live query: diagrams, excludes, type filter (when it has
     /// one), and the search (run, or cleared when it has none).
     func applyQuery(_ q: SavedQuery) {
-        if mode == .queue {
+        if mode == .queue || mode == .remote {
             mode = .tags
             selection = []
         }
@@ -1487,6 +1558,10 @@ final class TagStore: ObservableObject {
     /// clause passes and no exclude matches. Per diagram: painted regions
     /// gate the membership mask; otherwise the diagram's mode does.
     func refreshResults() {
+        if mode == .remote {
+            results = remoteItems
+            return
+        }
         if mode == .queue {
             results = sortItems(filteredQueue())
             rebuildQueueSections()   // sections track the visible queue for free
@@ -1729,6 +1804,13 @@ final class TagStore: ObservableObject {
     // MARK: - Public tag editing (registers undo)
 
     func addTag(_ tag: String, to urls: [URL]) {
+        if urls.contains(where: isRemote) {
+            Task {
+                let files = await libraryURLs(for: urls, tagging: true)
+                addTag(tag, to: files)
+            }
+            return
+        }
         let changed = urls.filter { !TagIO.tags(of: $0).contains(tag) }
         guard !changed.isEmpty else { return }
         lowSetTag(tag, on: changed, add: true)
@@ -1827,7 +1909,7 @@ final class TagStore: ObservableObject {
         // Never run a selection suggest while a queue-wide run or index warm-up is
         // in flight: concurrent plugin processes would race the persistent indexes.
         guard !queueSuggesting, !warmingUp else { return }
-        guard autoSuggestEnabled else { clearSuggestions(); return }
+        guard autoSuggestEnabled, mode != .remote else { clearSuggestions(); return }
         let items = results.filter { selection.contains($0.id) }
         guard !items.isEmpty else { clearSuggestions(); return }
         autoSuggestTask = Task { [weak self] in
@@ -2439,6 +2521,9 @@ final class TagStore: ObservableObject {
     // MARK: - Trash (registers undo)
 
     func trash(_ urls: [URL]) {
+        guard !urls.contains(where: isRemote) else {
+            return
+        }
         let pairs = lowTrash(urls)
         guard !pairs.isEmpty else { return }
         push("Move \(pairs.count) to Trash",
@@ -2544,6 +2629,34 @@ final class TagStore: ObservableObject {
         // The query persists across Tags/Queue/Explore — same model everywhere.
         // Search doesn't: the queue has its own bar and no search field.
         if m == .queue { clearSearch(refresh: false); scanQueue() } else { refreshResults() }
+        if m == .remote { clearSuggestions() }
+    }
+
+    /// Replace remote mode's results, keeping whatever is still selected.
+    func showRemote(_ items: [FileItem]) {
+        remoteItems = items
+        guard mode == .remote else {
+            return
+        }
+        results = items
+        let ids = Set(items.map(\.id))
+        selection.formIntersection(ids)
+    }
+
+    func isRemote(_ url: URL) -> Bool {
+        remoteHandler?.isRemote(url) ?? false
+    }
+
+    /// Library files for `urls`: remote previews are saved first (and come
+    /// back as the saved files); everything else passes through. `tagging` =
+    /// the caller adds its own tag next.
+    func libraryURLs(for urls: [URL], tagging: Bool = false) async -> [URL] {
+        let remote = urls.filter(isRemote)
+        guard !remote.isEmpty, let remoteHandler else {
+            return urls
+        }
+        let saved = await remoteHandler.libraryFiles(for: remote, tagging: tagging)
+        return urls.filter { !isRemote($0) } + saved
     }
 
     /// Everything visible enters the queue — files of any kind AND folders. The

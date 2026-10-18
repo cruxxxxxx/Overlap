@@ -117,11 +117,6 @@ private struct SourcePluginSection: View {
                         sources.route = .importFrom(pluginID: plugin.id)
                     }
                     .disabled(sources.busy || !signedIn)
-                    Button("Browse \(info.displayName)…") {
-                        sources.requestBrowse(plugin.id)
-                        openWindow(id: "source-browser", value: plugin.id)
-                    }
-                    .disabled(!signedIn)
                     Spacer()
                 }
             }
@@ -212,9 +207,8 @@ private struct SourcePluginSection: View {
                     if let page = link.collection.url, let url = URL(string: page) {
                         Button("Open on \(info.displayName)") { NSWorkspace.shared.open(url) }
                     }
-                    Button("Browse in Overlap") {
+                    Button("Open in Overlap") {
                         sources.requestBrowse(plugin.id, collection: link.collection)
-                        openWindow(id: "source-browser", value: plugin.id)
                     }
                     if info.canEditCollection == true && link.collection.writable != false {
                         Button("Edit \(info.noun.capitalized)…") {
@@ -562,10 +556,6 @@ struct SourceMenuItems: View {
         }
         ForEach(sources.plugins) { plugin in
             let name = plugin.manifest.source?.displayName ?? plugin.manifest.name
-            Button("Browse \(name)…") {
-                sources.requestBrowse(plugin.id)
-                openWindow(id: "source-browser", value: plugin.id)
-            }
             Button("Import from \(name)…") {
                 show(.importFrom(pluginID: plugin.id))
             }

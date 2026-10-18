@@ -12,6 +12,8 @@ import Foundation
 import UniformTypeIdentifiers
 
 let api = URL(string: "https://api.are.na/v3")!
+/// v3 search is Premium-only; the older v2 search still finds channels for everyone.
+let legacySearch = URL(string: "https://api.are.na/v2/search/channels")!
 let site = "https://www.are.na"
 let pageSize = 50
 
@@ -152,8 +154,10 @@ func errorText(_ data: Data) -> String {
     return ""
 }
 
-func call(_ method: String, _ path: String, query: [String: String] = [:], body: JSON? = nil) async throws -> JSON {
-    var components = URLComponents(url: api.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+func call(_ method: String, _ path: String, query: [String: String] = [:], body: JSON? = nil,
+          base: URL = api) async throws -> JSON {
+    let endpoint = path.isEmpty ? base : base.appendingPathComponent(path)
+    var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
     if !query.isEmpty {
         components.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
     }
@@ -215,6 +219,22 @@ func collection(_ channel: JSON, me: String?) -> JSON? {
     return out
 }
 
+/// A channel from the v2 search API, which uses its own field names.
+func legacyCollection(_ channel: JSON) -> JSON? {
+    guard let id = string(channel["id"]) else {
+        return nil
+    }
+    var out: JSON = ["id": id, "title": channel["title"] as? String ?? "Untitled"]
+    if let slug = channel["slug"] as? String {
+        out["url"] = (channel["owner_slug"] as? String).map { "\(site)/\($0)/\(slug)" } ?? "\(site)/channel/\(slug)"
+    }
+    out["count"] = channel["length"]
+    out["visibility"] = channel["status"]
+    out["updatedAt"] = channel["updated_at"]
+    out["owner"] = (channel["user"] as? JSON)?["full_name"]
+    return out
+}
+
 /// "https://www.are.na/user/my-channel", "my-channel", or "12345" → slug or id.
 func channelKey(_ input: String) -> String {
     let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -261,9 +281,12 @@ func opStatus() async -> Never {
             ["id": "following", "label": "Following", "symbol": "person.2"],
             ["id": "mine", "label": "My Channels", "symbol": "square.stack"],
         ]
-        // Search is a Premium endpoint; only offer it where it will work.
+        // Searching blocks is a Premium endpoint; everyone can search channels.
         if let tier = me["tier"] as? String, tier == "premium" || tier == "supporter" {
             scopes.append(["id": "search", "label": "Search", "takesQuery": true, "symbol": "magnifyingglass"])
+        } else {
+            scopes.append(["id": "searchChannels", "label": "Search Channels", "takesQuery": true,
+                           "symbol": "magnifyingglass"])
         }
         account["browseScopes"] = scopes
         emit(["account": account])
@@ -363,6 +386,9 @@ func item(_ block: JSON, staging: URL?, known: Set<String> = [], maxBytes: Int =
         item["text"] = (block["content"] as? JSON)?["markdown"] as? String ?? ""
         item["previewText"] = (block["content"] as? JSON)?["plain"]
     }
+    if type == "Embed", let html = (block["embed"] as? JSON)?["html"] as? String, html.contains("<iframe") {
+        item["embedHTML"] = html
+    }
     guard let staging, !known.contains(id) else {
         return item
     }
@@ -390,6 +416,17 @@ func item(_ block: JSON, staging: URL?, known: Set<String> = [], maxBytes: Int =
         downloads.append(Download(url: url, dest: dest))
         item["file"] = dest.path
         item["filename"] = name
+    case "Link", "Embed":
+        // Saved as its picture (a video's still, a page's screenshot); the
+        // link itself travels in sourceURL. No picture → the host writes a link file.
+        guard let src = image?["src"] as? String, let url = URL(string: src) else {
+            break
+        }
+        let name = image?["filename"] as? String ?? url.lastPathComponent
+        let dest = staging.appendingPathComponent("\(id)-\(safeName(name))")
+        downloads.append(Download(url: url, dest: dest))
+        item["file"] = dest.path
+        item["filename"] = (item["title"] as? String).map { withExtension($0, of: name) } ?? name
     default:
         break
     }
@@ -399,8 +436,18 @@ func item(_ block: JSON, staging: URL?, known: Set<String> = [], maxBytes: Int =
 /// Download, then drop items whose bytes didn't arrive.
 func finishDownloads(_ items: [JSON], _ downloads: [Download]) async -> [JSON] {
     let failed = await fetch(downloads)
-    return items.filter { item in
-        !((item["file"] as? String).map(failed.contains) ?? false)
+    return items.compactMap { item in
+        guard let file = item["file"] as? String, failed.contains(file) else {
+            return item
+        }
+        // A link or video whose picture didn't arrive is still worth a link file.
+        guard item["kind"] as? String == "link" || item["kind"] as? String == "embed" else {
+            return nil
+        }
+        var linkOnly = item
+        linkOnly["file"] = nil
+        linkOnly["filename"] = nil
+        return linkOnly
     }
 }
 
@@ -481,7 +528,7 @@ func nextPage(_ json: JSON, _ page: Int) -> String? {
 
 func opBrowse() async throws -> Never {
     let scope = req.scope ?? "collection"
-    if scope != "collection" {
+    if scope != "collection" && scope != "searchChannels" {
         requireToken()
     }
     let me = token.isEmpty ? nil : try? await myID()
@@ -531,6 +578,17 @@ func opBrowse() async throws -> Never {
         let json = try await call("GET", "search", query: query)
         let (collections, items) = split(json["data"] as? [JSON] ?? [], me: me)
         emitPage(collections: collections, items: items, next: nextPage(json, page))
+    case "searchChannels":
+        let text = (req.query ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            emitPage(collections: [], items: [], next: nil)
+        }
+        let page = Int(req.cursor ?? "1") ?? 1
+        let json = try await call("GET", "", query: ["q": text, "page": String(page), "per": String(pageSize)],
+                                  base: legacySearch)
+        let channels = (json["channels"] as? [JSON] ?? []).compactMap(legacyCollection)
+        let pages = json["total_pages"] as? Int ?? page
+        emitPage(collections: channels, items: [], next: page < pages ? String(page + 1) : nil)
     default:
         guard let key = req.collection else {
             fail("No channel given.")

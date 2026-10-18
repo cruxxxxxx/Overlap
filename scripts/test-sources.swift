@@ -127,5 +127,45 @@ let aFile = alpha.added.first { $0.lastPathComponent == "a.png" }!
 check(TagIO.tags(of: aFile).contains("mock/Gamma"), "a pick already here just gains the tag")
 check(saved.tags == ["mock/Beta", "mock/Gamma"], "outcome reports the tags used")
 
+write("png-d", "Beta/d.png")
+let untagged = await SourceEngine.save([SourceEngine.Pick(item: SourceItem(remoteId: "d.png", kind: "image"),
+                                                          collection: beta2)],
+                                       plugin: plugin, scope: scope, secrets: secrets, settings: settings,
+                                       tagCollections: false)
+let dFile = untagged.files["d.png"]
+check(dFile?.path.contains("Mock Source/Beta/") == true, "untagged save still files under its collection")
+check(dFile.map(TagIO.tags(of:)) == [], "tagCollections: false leaves the collection tag off")
+check(dFile.map { FileOrigin.records(of: $0).first?.remoteId } == "d.png", "untagged save still records its origin")
+let resaved = await SourceEngine.save([SourceEngine.Pick(item: SourceItem(remoteId: "c.png", kind: "image"),
+                                                       collection: beta2)],
+                                    plugin: plugin, scope: scope, secrets: secrets, settings: settings,
+                                    tagCollections: false)
+check(resaved.files["c.png"] != nil && resaved.added.isEmpty, "a pick already here comes back without a download")
+
+print("decoding")
+let fractional = #"{"collections":[{"id":"1","title":"T","updatedAt":"2026-10-16T23:34:10.565Z"}]}"#
+check((try? PluginCoder.decoder.decode(SourceResponse.self, from: Data(fractional.utf8)))?.collections?.first?.updatedAt != nil,
+      "dates with fractional seconds decode")
+let whole = #"{"items":[{"remoteId":"1","kind":"image","updatedAt":"2019-09-15T00:07:01Z"}]}"#
+check((try? PluginCoder.decoder.decode(SourceResponse.self, from: Data(whole.utf8)))?.items?.first?.updatedAt != nil,
+      "dates without fractional seconds decode")
+
+print("tag colors")
+let colorFile = work.appendingPathComponent("color.txt")
+try Data("x".utf8).write(to: colorFile)
+try TagIO.setTags(["keep"], on: colorFile)
+TagIO.setColor(.red, of: "keep", on: [colorFile])
+TagIO.addTag("more", to: [colorFile])
+check(TagIO.color(of: "keep", on: colorFile) == .red, "adding a tag keeps another tag's color")
+TagIO.renameTag("keep", to: "kept", in: [colorFile])
+check(TagIO.color(of: "kept", on: colorFile) == .red, "renaming keeps the color")
+TagIO.rememberColors(["blue-tag": .blue])
+TagIO.addTag("blue-tag", to: [colorFile])
+check(TagIO.color(of: "blue-tag", on: colorFile) == .blue, "a new tag takes its library color")
+TagIO.removeTag("more", from: [colorFile])
+check(TagIO.tags(of: colorFile) == ["kept", "blue-tag"], "remove keeps the rest in order")
+check((try? colorFile.resourceValues(forKeys: [.tagNamesKey]).tagNames) == ["kept", "blue-tag"],
+      "Finder's API reads what TagIO wrote")
+
 print(failures == 0 ? "\nall passed" : "\n\(failures) failed")
 exit(failures == 0 ? 0 : 1)

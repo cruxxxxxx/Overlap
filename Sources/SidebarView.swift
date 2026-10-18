@@ -47,16 +47,20 @@ struct SidebarView: View {
                         Text("Select files, then click a tag to apply")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
-                    if store.mode == .tags && search.isEmpty {
+                    if (store.mode == .tags || store.mode == .remote) && search.isEmpty {
                         SavedQueriesSection()
                         BoardsSection()
                         Section("Tags") { tagRows }
+                        ConnectedServicesSection()
                     } else {
                         tagRows
                     }
                 }
                 .listStyle(.sidebar)
                 .tutorialAnchor(.sidebar)
+            }
+            if store.mode == .tags || store.mode == .remote {
+                ServicesMenuBar()
             }
         }
         .sheet(item: $renaming) { node in renameSheet(node) }
@@ -298,7 +302,7 @@ struct TagRow: View {
     private var state: TriState { store.effectiveState(for: node.fullPath) }
 
     private var dotColor: Color {
-        if store.mode == .queue { return Color(nsColor: .tertiaryLabelColor) }
+        if store.mode == .queue || store.mode == .remote { return Color(nsColor: .tertiaryLabelColor) }
         switch state {
         case .off: return Color(nsColor: .tertiaryLabelColor)
         case .include: return .green
@@ -310,7 +314,12 @@ struct TagRow: View {
         Button {
             if store.mode == .queue {
                 store.addTag(node.fullPath, to: store.selectedURLs())
+            } else if store.mode == .remote && !store.selection.isEmpty {
+                store.addTag(node.fullPath, to: store.selectedURLs())
             } else {
+                if store.mode == .remote {
+                    store.setMode(.tags)
+                }
                 store.cycle(node.fullPath)
             }
         } label: {
@@ -319,6 +328,7 @@ struct TagRow: View {
                 Text(node.name)
                     .strikethrough(store.mode == .tags && state == .exclude)
                 Spacer()
+                TagColorDot(tag: node.fullPath)
                 Text("\(node.count)")
                     .font(.caption).monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -360,6 +370,24 @@ struct TagRow: View {
             } else {
                 Button("Hide Tag") { store.setHidden(node.fullPath, true) }
             }
+            Menu("Color") {
+                let current = store.color(of: node.fullPath)
+                ForEach(TagColor.choices) { color in
+                    Button {
+                        store.setColor(color, for: node.fullPath)
+                    } label: {
+                        Label {
+                            Text(color.name)
+                        } icon: {
+                            Image(nsImage: TagColorSwatch.image(color, selected: color == current))
+                        }
+                    }
+                }
+                Divider()
+                Button(current == .none ? "✓ None" : "None") {
+                    store.setColor(.none, for: node.fullPath)
+                }
+            }
             Divider()
             Button("New Subtag…") {
                 NotificationCenter.default.post(name: .tvNewSubtag, object: node)
@@ -395,6 +423,40 @@ struct TagRow: View {
             let targets = inSelection ? store.selectedURLs() : urls
             store.addTag(tag, to: targets.isEmpty ? urls : targets)
         }
+    }
+}
+
+/// A tag's Finder color as a small dot; nothing when the tag has no color.
+struct TagColorDot: View {
+    @EnvironmentObject var store: TagStore
+    let tag: String
+    var size: CGFloat = 7
+
+    var body: some View {
+        if let tint = store.color(of: tag).nsColor {
+            Circle().fill(Color(nsColor: tint)).frame(width: size, height: size)
+        }
+    }
+}
+
+/// Menu icons are rendered by AppKit, so SwiftUI shapes don't show there;
+/// draw the swatch as an image instead.
+enum TagColorSwatch {
+    static func image(_ color: TagColor, selected: Bool) -> NSImage {
+        let size = NSSize(width: 12, height: 12)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let circle = NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1))
+            (color.nsColor ?? .clear).setFill()
+            circle.fill()
+            if selected {
+                NSColor.labelColor.setStroke()
+                circle.lineWidth = 1.5
+                circle.stroke()
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 }
 
