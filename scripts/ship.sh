@@ -61,8 +61,8 @@ case "$email" in
     *) fail "git user.email is '$email' — GitHub rejects pushes that expose a private email. Use the noreply address." ;;
 esac
 
-# Only the version file and the notes may be uncommitted.
-dirty="$(git status --porcelain | grep -v -e ' project.yml$' -e " $NOTES\$" || true)"
+# Only the version file, its generated project and the notes may be uncommitted.
+dirty="$(git status --porcelain | grep -v -e ' project.yml$' -e ' Overlap.xcodeproj/' -e " $NOTES\$" || true)"
 [ -z "$dirty" ] || fail "uncommitted changes:
 $dirty"
 
@@ -105,7 +105,9 @@ if [ "$current" != "$VERSION" ]; then
     sed -i '' "s/MARKETING_VERSION: \"$current\"/MARKETING_VERSION: \"$VERSION\"/" project.yml
     echo "project.yml: $current → $VERSION"
 fi
-git add project.yml "$NOTES"
+# Keep the generated Xcode project in step with project.yml.
+xcodegen generate >/dev/null
+git add project.yml Overlap.xcodeproj "$NOTES"
 if ! git diff --cached --quiet; then
     git commit -q -m "Prepare release $VERSION"
     echo "committed: Prepare release $VERSION"
