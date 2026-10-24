@@ -5,7 +5,7 @@
   "protocolVersion": 1,
   "exec": "overlap-clip",
   "handles": ["image"],
-  "capabilities": ["search"],
+  "capabilities": ["search", "similar", "duplicates"],
   "batch": true,
   "wantsKnownTags": false,
   "wantsLibrary": true,
@@ -18,6 +18,9 @@
     { "key": "minScore", "type": "number", "label": "Minimum similarity",
       "section": "Search", "min": 0, "max": 0.4, "step": 0.01, "default": 0.15,
       "help": "CLIP cosine cutoff; good matches usually score 0.2–0.35" },
+    { "key": "similarMinScore", "type": "number", "label": "Find Similar cutoff",
+      "section": "Search", "min": 0.3, "max": 0.95, "step": 0.05, "default": 0.5,
+      "help": "How alike an image must be to show up in Find Similar" },
     { "key": "maxFileMB", "type": "number", "label": "Max file size (MB)",
       "section": "Indexing", "min": 5, "max": 200, "step": 5, "default": 25,
       "help": "Files larger than this are skipped when indexing" }

@@ -11,6 +11,10 @@ struct VennView: View {
     var onToggleRegion: (Int) -> Void = { _ in }
     var onRemoveTag: (String) -> Void = { _ in }
     var onExcludeTag: (String) -> Void = { _ in }
+    /// Right-click actions for the region under the cursor.
+    var regionMenu: ((Int) -> AnyView)? = nil
+    /// Badge every non-empty region, not just the hovered and painted ones.
+    var showAllCounts = false
     @Binding var zoom: CGFloat
     var height: CGFloat = 180
 
@@ -31,18 +35,36 @@ struct VennView: View {
                 canvas: geo.size, center: c)
 
             ZStack {
-                // fills: painted regions (strong) + hovered region (soft)
+                // fills: painted regions (strong) + hovered region (soft);
+                // once anything is painted, the unpainted regions it leaves
+                // out are hatched — the difference reads as cut away.
                 Canvas { ctx, size in
-                    func fillRegion(_ mask: Int, _ color: Color) {
+                    func shadeRegion(_ mask: Int, _ shade: (inout GraphicsContext) -> Void) {
                         let inBits = (0..<k).filter { mask & (1 << $0) != 0 }
                         let outBits = (0..<k).filter { mask & (1 << $0) == 0 }
                         ctx.drawLayer { l in
                             for i in inBits { l.clip(to: circlePath(centers[i], radii[i])) }
-                            l.fill(Path(CGRect(origin: .zero, size: size)), with: .color(color))
+                            shade(&l)
                             for j in outBits {
                                 l.blendMode = .destinationOut
                                 l.fill(circlePath(centers[j], radii[j]), with: .color(.black))
                             }
+                        }
+                    }
+                    func fillRegion(_ mask: Int, _ color: Color) {
+                        shadeRegion(mask) { l in
+                            l.fill(Path(CGRect(origin: .zero, size: size)), with: .color(color))
+                        }
+                    }
+                    func hatchRegion(_ mask: Int, _ color: Color) {
+                        shadeRegion(mask) { l in
+                            l.stroke(hatchLines(in: size), with: .color(color), lineWidth: 1)
+                        }
+                    }
+                    if !selectedRegions.isEmpty {
+                        for (mask, count) in regions where mask != 0 && count > 0
+                            && !selectedRegions.contains(mask) {
+                            hatchRegion(mask, Color.primary.opacity(0.3))
                         }
                     }
                     for mask in selectedRegions where (regions[mask] ?? 0) > 0 {
@@ -70,7 +92,11 @@ struct VennView: View {
                         .frame(width: radii[i] * 2, height: radii[i] * 2)
                         .contentShape(Circle())
                         .contextMenu {
-                            Text(tags[i])
+                            if let regionMenu, hoverMask != 0, (regions[hoverMask] ?? 0) > 0 {
+                                regionMenu(hoverMask)
+                                Divider()
+                            }
+                            Text(QuerySet.displayName(tags[i]))
                             Divider()
                             Button("Remove from Diagram") { onRemoveTag(tags[i]) }
                             Button("Exclude (NOT)") { onExcludeTag(tags[i]) }
@@ -90,7 +116,8 @@ struct VennView: View {
                 let poles = VennLayout.regionPoles(k: k, centers: centers, radii: radii, regions: regions)
                 ForEach(Array(regions.keys.sorted()), id: \.self) { mask in
                     let on = selectedRegions.contains(mask)
-                    if let cnt = regions[mask], cnt > 0, mask == hoverMask || on {
+                    if let cnt = regions[mask], cnt > 0,
+                       mask == hoverMask || on || (showAllCounts && poles[mask] != nil) {
                         let anchor = poles[mask]?.point
                             ?? VennLayout.fallbackAnchor(mask: mask, k: k, centers: centers)
                         Text("\(cnt)")
@@ -114,7 +141,7 @@ struct VennView: View {
                     let solo = regions[soloMask] ?? 0
                     let inHover = hoverMask & soloMask != 0 && (regions[hoverMask] ?? 0) > 0
                     let soloOn = selectedRegions.contains(soloMask)
-                    Text(tags[i].split(separator: "/").last.map(String.init) ?? tags[i])
+                    Text(QuerySet.shortName(tags[i]))
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(soloOn ? Color.accentColor
                                         : inHover ? Color.accentColor : Color.primary.opacity(0.8))
@@ -126,8 +153,8 @@ struct VennView: View {
                             if solo > 0 { onToggleRegion(soloMask) }
                         }
                         .help(solo > 0
-                              ? "Click: only \(tags[i]) (\(solo)) — the exclusive region"
-                              : "No images carry only \(tags[i]) in this diagram")
+                              ? "Click: only \(QuerySet.displayName(tags[i])) (\(solo)) — the exclusive region"
+                              : "No images are only in \(QuerySet.displayName(tags[i])) in this diagram")
                 }
             }
             .animation(.spring(response: 0.45, dampingFraction: 0.7), value: k)
@@ -219,6 +246,18 @@ struct VennView: View {
             .padding(6)
             .transition(.opacity)
         }
+    }
+
+    /// 45° lines across the whole canvas, 5 pt apart; callers clip them.
+    private func hatchLines(in size: CGSize) -> Path {
+        var lines = Path()
+        var x = -size.height
+        while x < size.width {
+            lines.move(to: CGPoint(x: x, y: size.height))
+            lines.addLine(to: CGPoint(x: x + size.height, y: 0))
+            x += 5
+        }
+        return lines
     }
 
     private func circlePath(_ c: CGPoint, _ r: CGFloat) -> Path {

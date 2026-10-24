@@ -7,6 +7,8 @@ import Foundation
 ///   - warm-up:  query nil,  library = every image in the corpus → plugin embeds
 ///               what's new, returns no hits.
 ///   - query:    query text, library []  → plugin ranks its index, returns hits.
+///   - similar:  similarTo paths (plugins with `similar`) → hits ranked by
+///               likeness to those images, which are left out.
 ///
 /// Hits are NOT path-validated against `files` (there are none) — the whole
 /// point is surfacing files the host didn't ask about.
@@ -18,18 +20,20 @@ enum SearchEngine {
         var ranPlugin = false          // false: no enabled search plugin installed
     }
 
-    nonisolated static func searchPlugins(disabledIDs: Set<String>) -> [DiscoveredPlugin] {
+    nonisolated static func searchPlugins(disabledIDs: Set<String>,
+                                          capability: String = "search") -> [DiscoveredPlugin] {
         PluginRegistry.discover().filter { p in
-            !disabledIDs.contains(p.id) && p.supports("search") && p.handles(.image)
+            !disabledIDs.contains(p.id) && p.supports(capability) && p.handles(.image)
         }
     }
 
     /// Runs off-main (call from a detached task).
-    nonisolated static func run(query: String?, library: [LibraryItem],
+    nonisolated static func run(query: String?, similarTo: [String]? = nil, library: [LibraryItem],
                                 disabledIDs: Set<String> = [],
                                 pluginSettings: [String: [String: SettingValue]] = [:],
                                 onProgress: (@Sendable (String) -> Void)? = nil) async -> Outcome {
-        let plugins = searchPlugins(disabledIDs: disabledIDs)
+        let plugins = searchPlugins(disabledIDs: disabledIDs,
+                                    capability: similarTo == nil ? "search" : "similar")
         guard !plugins.isEmpty else { return Outcome() }
 
         let responses = await withTaskGroup(of: SuggestResponse?.self) { group -> [SuggestResponse] in
@@ -40,11 +44,12 @@ enum SearchEngine {
                         knownTags: nil,
                         library: plugin.manifest.wantsLibrary ? library : nil,
                         settings: TagStore.effectiveSettings(for: plugin, stored: pluginSettings),
-                        query: query)
+                        query: query,
+                        similarTo: similarTo)
                     // Indexing may legitimately run for an hour; a query that
                     // hangs must not pin the spinner that long.
                     let m = plugin.manifest
-                    let timeout = query == nil ? m.timeoutMs : (m.queryTimeoutMs ?? min(m.timeoutMs, 60_000))
+                    let timeout = query == nil && similarTo == nil ? m.timeoutMs : (m.queryTimeoutMs ?? min(m.timeoutMs, 60_000))
                     return SuggestionEngine.runProcess(plugin, request: req, timeoutMs: timeout,
                                                        onProgress: onProgress)
                 }

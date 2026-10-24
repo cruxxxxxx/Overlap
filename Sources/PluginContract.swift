@@ -18,6 +18,21 @@ struct SuggestRequest: Codable {
     var library: [LibraryItem]?       // sent only when manifest.wantsLibrary
     var settings: [String: SettingValue]?  // merged values for manifest.settings keys
     var query: String? = nil          // search plugins only: free-text query; nil = index warm-up
+    var similarTo: [String]? = nil    // `similar` plugins only: rank by likeness to these images
+    var duplicates: DuplicatesQuery? = nil  // `duplicates` plugins only: near-identical pairs
+}
+
+/// Near-duplicate scan: pairs scoring at least `threshold` (plugin-defined,
+/// cosine for overlap-clip), among `paths` when given, else the whole index.
+struct DuplicatesQuery: Codable {
+    var threshold: Double
+    var paths: [String]?
+}
+
+struct DuplicatePair: Codable, Hashable {
+    let a: String
+    let b: String
+    let score: Double
 }
 
 // MARK: - Plugin-declared settings (rendered by the host's Plugin Settings UI)
@@ -100,6 +115,7 @@ struct SuggestResponse: Codable {
     let suggestions: [RawSuggestion]?
     var hits: [SearchHit]? = nil      // search plugins: ranked matches for `query`
     var indexedCount: Int? = nil      // search plugins: images in the persisted index
+    var pairs: [DuplicatePair]? = nil // duplicates plugins: pairs at or above the threshold
 }
 
 /// One ranked search match. `score` is plugin-defined (CLIP cosine for

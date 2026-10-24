@@ -32,6 +32,9 @@ Overlap reads and writes real macOS tags (`com.apple.metadata:_kMDItemUserTags`)
 
 - **Boolean & Venn queries** — tri-state tag chips (include / exclude / off) with **All** (AND), **Any** (OR), **Exact** (only these tags), and multi-diagram **Groups** (`(A OR B) AND C`). Paint regions of a Venn diagram to select exact intersections; the diagram is laid out from the real data.
 - **Saved queries** — name and reuse a whole Venn setup (diagrams + excludes).
+- **More than tags in a Venn** — a circle can be a semantic search, "like these images", a file type, an extension or a year. Right-click any region to show only it, exclude it, select it, tag it or make a board from it. A plain sentence spells out the query.
+- **Find Similar** (⌘L) — right-click images and get your library ranked by likeness. Works on connected-service previews too.
+- **Find Duplicates** (⌘⇧D) — byte-identical copies plus resized or recompressed ones, side by side with size and resolution. Keep one (the others go to the Trash, their tags move onto it), merge tags only, or mark "not duplicates".
 - **Any file type** — images, video (inline playback), audio, PDFs, text, archives, and folders. Filter results by **kind** or **extension**.
 - **Live results grid** — QuickLook thumbnails (ImageIO fallback for odd files), animated GIFs, adjustable size, multi-select, keyboard navigation.
 - **Split preview** — a large live preview with per-type info (resolution, duration, size, dates) and image EXIF (camera, lens, exposure).
@@ -86,7 +89,7 @@ Overlap runs unsandboxed so it can read and write Finder tags across your folder
 Tag suggestions, semantic search and connected services come from an **out-of-process plugin system** — standalone executables, in any language, discovered at runtime. Overlap pipes a JSON request to a plugin's stdin and reads the answer from stdout, so model and service logic ship separately from the app, which knows nothing about any particular service. Three plugins are bundled:
 
 - **overlap-suggest** (Tag Suggestions) — Apple Vision: visual similarity, face identities, scene labels, OCR, fused with your own tag co-occurrence.
-- **overlap-clip** (Search) — MobileCLIP-S2 text→image search over every image in scope.
+- **overlap-clip** (Search) — MobileCLIP-S2 text→image search over every image in scope, plus Find Similar and near-duplicate detection from the same index.
 - **overlap-arena** (Connected Services) — Are.na: browse, import, sync, send, and publish channels.
 
 → **[How to write a plugin](docs/PLUGINS.md).**

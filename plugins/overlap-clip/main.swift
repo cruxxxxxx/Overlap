@@ -15,9 +15,11 @@ import Accelerate
 // Models are Apple's Core ML exports (huggingface.co/apple/coreml-mobileclip),
 // downloaded on first use into the plugin cache — the app itself stays small.
 //
-// Two request shapes:
+// Three request shapes:
 //   warm-up:  library = [every image], query = nil  → embed what's new, no hits
 //   query:    library = [],            query = text → rank the index, return hits
+//   similar:  similarTo = [paths]                    → rank the index by likeness to them
+//   duplicates: duplicates = {threshold, paths?}     → pairs of near-identical images
 
 // MARK: - Wire contract (hand-copied from Sources/PluginContract.swift)
 
@@ -57,7 +59,16 @@ struct SuggestRequest: Codable {
     let library: [LibraryItem]?
     let settings: [String: SettingValue]?
     let query: String?
+    let similarTo: [String]?
+    let duplicates: DuplicatesQuery?
 }
+/// Near-duplicate scan: every pair of indexed images (restricted to `paths`
+/// when given) at or above `threshold` cosine.
+struct DuplicatesQuery: Codable {
+    let threshold: Double
+    let paths: [String]?
+}
+struct DuplicatePair: Codable { let a: String; let b: String; let score: Double }
 struct RawSuggestion: Codable {
     let path: String; let tag: String
     let confidence: Double; let source: String?
@@ -68,6 +79,7 @@ struct SuggestResponse: Codable {
     let suggestions: [RawSuggestion]
     let hits: [SearchHit]
     let indexedCount: Int
+    var pairs: [DuplicatePair]? = nil
 }
 
 // MARK: - Config
@@ -76,6 +88,7 @@ struct Config: Codable {
     var variant = "s2"          // mobileclip_{s0,s1,s2,blt}; switching re-embeds everything
     var maxResults = 300
     var minScore = 0.15         // CLIP cosine; good matches usually land 0.2–0.35
+    var similarMinScore = 0.5   // image↔image cosine runs much higher than text↔image
     var maxFileMB = 25
     var batchSize = 32          // images per Core ML batch prediction
     var decodeMaxPixel = 320    // ImageIO thumbnail edge before the 256 crop
@@ -88,6 +101,7 @@ struct Config: Codable {
         variant = try c.decodeIfPresent(String.self, forKey: .variant) ?? variant
         maxResults = try c.decodeIfPresent(Int.self, forKey: .maxResults) ?? maxResults
         minScore = try c.decodeIfPresent(Double.self, forKey: .minScore) ?? minScore
+        similarMinScore = try c.decodeIfPresent(Double.self, forKey: .similarMinScore) ?? similarMinScore
         maxFileMB = try c.decodeIfPresent(Int.self, forKey: .maxFileMB) ?? maxFileMB
         batchSize = try c.decodeIfPresent(Int.self, forKey: .batchSize) ?? batchSize
         decodeMaxPixel = try c.decodeIfPresent(Int.self, forKey: .decodeMaxPixel) ?? decodeMaxPixel
@@ -140,6 +154,7 @@ func applyHostSettings(_ s: [String: SettingValue]?) {
     guard let s else { return }
     if let v = s["maxResults"]?.numberValue { config.maxResults = max(1, Int(v)) }
     if let v = s["minScore"]?.numberValue { config.minScore = v }
+    if let v = s["similarMinScore"]?.numberValue { config.similarMinScore = v }
     if let v = s["maxFileMB"]?.numberValue { config.maxFileMB = max(1, Int(v)) }
 }
 
@@ -513,7 +528,50 @@ func search(_ text: String, textEncoder: ClipEncoder) -> [SearchHit] {
     guard let provider = try? MLDictionaryFeatureProvider(dictionary: [textEncoder.inputName: arr]),
           let out = try? textEncoder.model.prediction(from: provider),
           let q = textEncoder.vector(from: out), q.count == meta.dim else { return [] }
+    return rank(q, minScore: config.minScore, excluding: [])
+}
 
+/// Images like the given ones: their vectors (stored, or embedded now for a
+/// file the index hasn't seen) averaged into one query.
+func similar(to paths: [String], imageEncoder: () -> ClipEncoder?) -> [SearchHit] {
+    guard meta.dim > 0, meta.rows > 0 else { return [] }
+    var sum = [Float](repeating: 0, count: meta.dim)
+    var used = 0
+    var encoder: ClipEncoder?
+    for path in paths {
+        var vector = storedVector(path)
+        if vector == nil {
+            if encoder == nil {
+                encoder = imageEncoder()
+            }
+            if let encoder, let cg = downsampledImage(path, maxPixel: config.decodeMaxPixel),
+               let feature = imageFeature(cg, for: encoder),
+               let provider = try? MLDictionaryFeatureProvider(dictionary: [encoder.inputName: feature]),
+               let out = try? encoder.model.prediction(from: provider) {
+                vector = encoder.vector(from: out)
+            }
+        }
+        guard let vector, vector.count == meta.dim else { continue }
+        vDSP_vadd(sum, 1, vector, 1, &sum, 1, vDSP_Length(meta.dim))
+        used += 1
+    }
+    guard used > 0 else { return [] }
+    normalize(&sum)
+    return rank(sum, minScore: config.similarMinScore, excluding: Set(paths))
+}
+
+func storedVector(_ path: String) -> [Float]? {
+    guard let row = meta.images[path]?.row, row >= 0,
+          let fh = try? FileHandle(forReadingFrom: binURL) else { return nil }
+    defer { try? fh.close() }
+    let rowBytes = meta.dim * 4
+    try? fh.seek(toOffset: UInt64(row * rowBytes))
+    guard let data = try? fh.read(upToCount: rowBytes), data.count == rowBytes else { return nil }
+    return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+}
+
+/// Cosine against every stored row (vectors are normalized), best first.
+func rank(_ q: [Float], minScore: Double, excluding: Set<String>) -> [SearchHit] {
     guard let fh = try? FileHandle(forReadingFrom: binURL) else { return [] }
     defer { try? fh.close() }
     let size = Int(lseek(fh.fileDescriptor, 0, SEEK_END))
@@ -527,14 +585,82 @@ func search(_ text: String, textEncoder: ClipEncoder) -> [SearchHit] {
     var scored: [SearchHit] = []
     scored.reserveCapacity(meta.images.count)
     q.withUnsafeBufferPointer { qp in
-        for (path, rec) in meta.images where rec.row >= 0 && (rec.row + 1) * rowBytes <= size {
+        for (path, rec) in meta.images where rec.row >= 0 && (rec.row + 1) * rowBytes <= size
+            && !excluding.contains(path) {
             var d: Float = 0
             vDSP_dotpr(qp.baseAddress!, 1, base.advanced(by: rec.row * dim), 1, &d, vDSP_Length(dim))
-            if Double(d) >= config.minScore { scored.append(SearchHit(path: path, score: Double(d))) }
+            if Double(d) >= minScore { scored.append(SearchHit(path: path, score: Double(d))) }
         }
     }
     scored.sort { $0.score > $1.score }
     return Array(scored.prefix(config.maxResults))
+}
+
+// MARK: - Near duplicates
+
+let maxDuplicatePairs = 50_000
+
+/// All pairs at or above the threshold, via blocked matrix products of the
+/// stored (normalized) vectors. 20k images ≈ 200M dot products: a few seconds.
+func duplicatePairs(_ q: DuplicatesQuery) -> [DuplicatePair] {
+    guard meta.dim > 0, meta.rows > 0, let fh = try? FileHandle(forReadingFrom: binURL) else { return [] }
+    defer { try? fh.close() }
+    let size = Int(lseek(fh.fileDescriptor, 0, SEEK_END))
+    guard size > 0, let raw = mmap(nil, size, PROT_READ, MAP_PRIVATE, fh.fileDescriptor, 0),
+          raw != MAP_FAILED else { return [] }
+    defer { munmap(raw, size) }
+    let stored = UnsafePointer(raw.assumingMemoryBound(to: Float.self))
+    let dim = meta.dim
+
+    let wanted = q.paths.map(Set.init)
+    let entries = meta.images
+        .filter { $0.value.row >= 0 && ($0.value.row + 1) * dim * 4 <= size && wanted?.contains($0.key) != false }
+        .sorted { $0.key < $1.key }
+    let n = entries.count
+    guard n > 1 else { return [] }
+    var matrix = [Float](repeating: 0, count: n * dim)
+    for (i, entry) in entries.enumerated() {
+        matrix.withUnsafeMutableBufferPointer { m in
+            m.baseAddress!.advanced(by: i * dim).update(from: stored.advanced(by: entry.value.row * dim), count: dim)
+        }
+    }
+
+    let threshold = Float(q.threshold)
+    let block = 512
+    var pairs: [DuplicatePair] = []
+    var scores = [Float](repeating: 0, count: block * block)
+    let blocks = (n + block - 1) / block
+    var done = 0
+    let total = blocks * (blocks + 1) / 2
+    matrix.withUnsafeBufferPointer { m in
+        let base = m.baseAddress!
+        outer: for bi in 0..<blocks {
+            let i0 = bi * block, rows = min(block, n - i0)
+            for bj in bi..<blocks {
+                let j0 = bj * block, cols = min(block, n - j0)
+                // scores (rows×cols) = A_i · A_jᵀ
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, Int32(rows), Int32(cols), Int32(dim),
+                            1, base.advanced(by: i0 * dim), Int32(dim),
+                            base.advanced(by: j0 * dim), Int32(dim), 0, &scores, Int32(cols))
+                for r in 0..<rows {
+                    let start = bi == bj ? r + 1 : 0
+                    for c in stride(from: start, to: cols, by: 1) where scores[r * cols + c] >= threshold {
+                        pairs.append(DuplicatePair(a: entries[i0 + r].key, b: entries[j0 + c].key,
+                                                   score: Double(scores[r * cols + c])))
+                    }
+                }
+                done += 1
+                if done % 20 == 0 {
+                    stderrLine("Comparing images… \(done * 100 / total)%")
+                }
+                if pairs.count >= maxDuplicatePairs {
+                    stderrLine("Stopped at \(maxDuplicatePairs) pairs; raise the threshold")
+                    break outer
+                }
+            }
+        }
+    }
+    return pairs.sorted { $0.score > $1.score }
 }
 
 // MARK: - Main
@@ -549,9 +675,14 @@ applyHostSettings(req.settings)
 
 let library = req.library ?? []
 let query = req.query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+let similarTo = req.similarTo ?? []
 var hits: [SearchHit] = []
+var pairs: [DuplicatePair]?
+if let dup = req.duplicates {
+    pairs = duplicatePairs(dup)   // read-only, like search: no lock (a warm-up may hold it for minutes)
+}
 
-if !library.isEmpty || !query.isEmpty {
+if !library.isEmpty || !query.isEmpty || !similarTo.isEmpty {
     let spec = ModelSpec(variant: config.variant)
     if let reason = ensureModels(spec) {
         stderrLine("CLIP model unavailable: \(reason)")
@@ -573,11 +704,16 @@ if !library.isEmpty || !query.isEmpty {
             } else {
                 stderrLine("CLIP text encoder failed to load")
             }
+        } else if !similarTo.isEmpty {
+            hits = similar(to: similarTo) {
+                ClipEncoder.load(spec.compiled(spec.imageName), wantsImage: true)
+            }
         }
     }
 }
 
-let resp = SuggestResponse(protocolVersion: 1, suggestions: [], hits: hits, indexedCount: liveCount)
+let resp = SuggestResponse(protocolVersion: 1, suggestions: [], hits: hits, indexedCount: liveCount,
+                           pairs: pairs)
 let encoder = JSONEncoder()
 FileHandle.standardOutput.write((try? encoder.encode(resp))
     ?? Data("{\"protocolVersion\":1,\"suggestions\":[],\"hits\":[],\"indexedCount\":0}".utf8))

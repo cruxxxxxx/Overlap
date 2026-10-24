@@ -69,6 +69,11 @@ final class TagStore: ObservableObject {
     // Semantic search — `capabilities: ["search"]` plugins (overlap-clip).
     /// The submitted query; nil = inactive, results come from the tag query.
     @Published private(set) var searchQuery: String?
+    /// Find Similar: the images the results are ranked against; nil = inactive.
+    /// Shares the search's hits and relevance order; one or the other is set.
+    @Published private(set) var similarTo: [URL]?
+    /// A plugin with the `similar` capability is installed + enabled.
+    @Published private(set) var similarAvailable = false
     @Published private(set) var searching = false
     @Published private(set) var searchStatus: SearchStatus = .ok
     /// A search plugin is installed + enabled (cached; discovery hits disk).
@@ -88,6 +93,11 @@ final class TagStore: ObservableObject {
     private var lastSearchWarmedSig = ""
     /// A query submitted while the index was building; runs when it finishes.
     private var pendingSearchQuery: String?
+    private var pendingSimilar: [URL]?
+    /// Members of plugin-backed circles (`@search:`, `@similar:`), by set.
+    /// Recomputed on demand; nothing is persisted.
+    @Published private(set) var setHits: [String: Set<String>] = [:]
+    private var setHitsInFlight: Set<String> = []
 
     /// Query export in flight ("Exporting 120/292…"); nil when idle.
     @Published private(set) var exportProgress: String?
@@ -1532,7 +1542,11 @@ final class TagStore: ObservableObject {
             let mask = membershipMask(of: item, over: tags)
             if mask != 0 { regions[mask, default: 0] += 1 }
         }
-        let totals = tags.map { tagCounts[$0] ?? 0 }
+        let totals = tags.map { tag in
+            tag.hasPrefix("@") && !QuerySet(tag).isTag
+                ? visibleItems.filter { hasTag($0, tag) }.count
+                : tagCounts[tag] ?? 0
+        }
         return (totals, regions)
     }
 
@@ -1544,7 +1558,26 @@ final class TagStore: ObservableObject {
 
     private func hasTag(_ item: FileItem, _ tag: String) -> Bool {
         if item.tagSet.contains(tag) { return true }
+        if tag.hasPrefix("@") {
+            switch QuerySet(tag) {
+            case .tag:
+                break
+            case .kind(let kind):
+                return item.kind == kind
+            case .ext(let ext):
+                return item.ext == ext
+            case .year(let year):
+                return item.year == year
+            case .search, .similar:
+                return setHits[tag]?.contains(item.id) ?? false
+            }
+        }
         return isPrefix(tag) && item.tagSet.contains { $0.hasPrefix(tag + "/") }
+    }
+
+    /// Does a query set name this tag (itself, or as its parent)?
+    private func covers(_ sets: [String], _ tag: String) -> Bool {
+        sets.contains { $0 == tag || tag.hasPrefix($0 + "/") }
     }
 
     private func membershipMask(of item: FileItem, over tags: [String]) -> Int {
@@ -1558,6 +1591,7 @@ final class TagStore: ObservableObject {
     /// clause passes and no exclude matches. Per diagram: painted regions
     /// gate the membership mask; otherwise the diagram's mode does.
     func refreshResults() {
+        ensureSetHits()
         if mode == .remote {
             results = remoteItems
             return
@@ -1595,13 +1629,18 @@ final class TagStore: ObservableObject {
             else { clauses[clauses.count - 1].append(g) }
         }
 
+        // Exact = this diagram's sets and no tag the query doesn't name, so an
+        // Exact diagram still combines with the others.
+        let named = querySets.filter { QuerySet($0).isTag }
         func passes(_ item: FileItem, _ g: VennGroup) -> Bool {
             let mask = membershipMask(of: item, over: g.sets)
             if !g.regions.isEmpty { return g.regions.contains(mask) }
             switch g.mode {
             case .all:  return mask == (1 << g.sets.count) - 1
             case .any:  return mask != 0
-            case .only: return item.tagSet == Set(g.sets)
+            case .only:
+                return mask == (1 << g.sets.count) - 1
+                    && item.tags.allSatisfy { self.covers(named, $0) }
             }
         }
 
@@ -1775,16 +1814,16 @@ final class TagStore: ObservableObject {
     private func syncTags(for urls: [URL]) {
         let ids = Set(urls.map { $0.path })
         for i in allItems.indices where ids.contains(allItems[i].id) {
-            allItems[i] = FileItem.load(allItems[i].url)
+            allItems[i] = FileItem.reload(allItems[i].url)
         }
         for i in queueItems.indices where ids.contains(queueItems[i].id) {
-            queueItems[i] = FileItem.load(queueItems[i].url)
+            queueItems[i] = FileItem.reload(queueItems[i].url)
         }
         for id in ids where searchExtras[id] != nil {
-            searchExtras[id] = FileItem.load(URL(fileURLWithPath: id))
+            searchExtras[id] = FileItem.reload(URL(fileURLWithPath: id))
         }
         for i in vaultItems.indices where ids.contains(vaultItems[i].id) {
-            vaultItems[i] = FileItem.load(vaultItems[i].url)
+            vaultItems[i] = FileItem.reload(vaultItems[i].url)
         }
         recomputeCounts()
         refreshVisible()
@@ -2184,6 +2223,8 @@ final class TagStore: ObservableObject {
 
     private func refreshSearchAvailability() {
         searchAvailable = !SearchEngine.searchPlugins(disabledIDs: disabledPluginIDs).isEmpty
+        similarAvailable = !SearchEngine.searchPlugins(disabledIDs: disabledPluginIDs,
+                                                       capability: "similar").isEmpty
     }
 
     /// Every image under the scope (any depth) and the watched folders (queue
@@ -2259,10 +2300,18 @@ final class TagStore: ObservableObject {
                 self.searchIndexing = false
                 self.searchProgress = nil
                 self.lastSearchWarmedSig = corpus.sig
+                if !self.setHits.isEmpty {
+                    self.setHits = [:]   // the index changed: circles re-run
+                    self.refreshResults()
+                }
                 if let q = self.pendingSearchQuery {
                     self.pendingSearchQuery = nil
                     self.searching = false
                     self.runSearch(q)
+                } else if let urls = self.pendingSimilar {
+                    self.pendingSimilar = nil
+                    self.searching = false
+                    self.findSimilar(urls)
                 }
             }
         }
@@ -2275,16 +2324,38 @@ final class TagStore: ObservableObject {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { clearSearch(); return }
         searchQuery = text
+        similarTo = nil
         searching = true
         if searchIndexing { pendingSearchQuery = text; return }   // runs when it finishes
+        startSearch(query: text, similarTo: nil)
+    }
+
+    /// Rank the library by likeness to these images (averaged when several).
+    /// The images themselves are left out; the tag query narrows the hits.
+    func findSimilar(_ urls: [URL]) {
+        // Same rule as every plugin: hidden and vault files never go out.
+        let images = shareableForSource(urls).allowed
+            .filter { FileKind.of(contentType: nil, ext: $0.pathExtension) == .image }
+        guard !images.isEmpty else { return }
+        if mode != .tags && mode != .explore {
+            setMode(.tags)
+        }
+        searchQuery = nil
+        similarTo = images
+        searching = true
+        if searchIndexing { pendingSearchQuery = nil; pendingSimilar = images; return }
+        startSearch(query: nil, similarTo: images.map(\.path))
+    }
+
+    private func startSearch(query text: String?, similarTo paths: [String]?) {
         let token = UUID()
         searchToken = token
         let known = Set(allItems.map(\.id))
         let disabled = disabledPluginIDs, settings = pluginSettings
         let extras = searchExtras
         Task.detached(priority: .userInitiated) { [weak self] in
-            let outcome = await SearchEngine.run(query: text, library: [], disabledIDs: disabled,
-                                                 pluginSettings: settings)
+            let outcome = await SearchEngine.run(query: text, similarTo: paths, library: [],
+                                                 disabledIDs: disabled, pluginSettings: settings)
             let hits = Array(outcome.hits.prefix(maxSearchHits))
             let hitPaths = Set(hits.map(\.path))
             var loaded = extras.filter { hitPaths.contains($0.key) }
@@ -2314,10 +2385,15 @@ final class TagStore: ObservableObject {
     var queryDescription: String {
         var parts: [String] = []
         if let q = searchQuery { parts.append("“\(q)”") }
+        if let images = similarTo, images.count > 0 {
+            parts.append(images.count == 1
+                         ? "like \(images[0].deletingPathExtension().lastPathComponent)"
+                         : "like \(images.count) images")
+        }
         var clause = ""
         for g in groups where !g.sets.isEmpty {
             let joiner = g.regions.isEmpty && g.mode == .any ? " or " : " + "
-            let text = g.sets.joined(separator: joiner)
+            let text = g.sets.map(QuerySet.displayName).joined(separator: joiner)
             if clause.isEmpty { clause = text }
             else { clause += (g.op == .or ? " or " : " and ") + text }
         }
@@ -2362,7 +2438,9 @@ final class TagStore: ObservableObject {
     func clearSearch(refresh: Bool = true) {
         searchToken = UUID()
         pendingSearchQuery = nil
+        pendingSimilar = nil
         searchQuery = nil
+        similarTo = nil
         searchHits = nil
         searchExtras = [:]
         searching = false
@@ -2903,4 +2981,265 @@ final class TagStore: ObservableObject {
     }
 
     private var fmHome: URL { FileManager.default.homeDirectoryForCurrentUser }
+}
+
+// MARK: - Duplicates
+
+extension TagStore {
+    /// Files a duplicate scan looks at: the current results, or every file
+    /// Overlap knows (tagged and queue). Hidden and vault files are left out,
+    /// as for the plugins, so their paths never reach the not-duplicates list.
+    func duplicateCandidates(wholeLibrary: Bool) -> [URL] {
+        let pool = wholeLibrary ? allItems + queueItems : results
+        var seen = Set<String>()
+        return pool.filter { $0.kind != .folder && pluginMaySee($0) && seen.insert($0.id).inserted }
+            .map(\.url)
+    }
+
+    var duplicatePluginsAvailable: Bool {
+        !SearchEngine.searchPlugins(disabledIDs: disabledPluginIDs, capability: "duplicates").isEmpty
+    }
+
+    /// Resolve one duplicate group: `others` lose nothing, as their tags are
+    /// copied onto `keeper` first; then, when `trashOthers`, they go to the
+    /// Trash. One undo step.
+    func resolveDuplicates(keeper: URL, others: [URL], trashOthers: Bool) {
+        let keeperTags = Set(TagIO.tags(of: keeper))
+        var added: [String] = []
+        for tag in others.flatMap(TagIO.tags(of:)) where !keeperTags.contains(tag) && !added.contains(tag) {
+            added.append(tag)
+        }
+        for tag in added {
+            lowSetTag(tag, on: [keeper], add: true)
+        }
+        let trashed = trashOthers ? lowTrash(others) : []
+        guard !added.isEmpty || !trashed.isEmpty else { return }
+        let name = trashOthers ? "Keep 1 of \(others.count + 1)" : "Merge Tags"
+        push(name,
+             undo: { [weak self] in
+                 self?.lowRestore(trashed)
+                 for tag in added {
+                     self?.lowSetTag(tag, on: [keeper], add: false)
+                 }
+             },
+             redo: { [weak self] in
+                 for tag in added {
+                     self?.lowSetTag(tag, on: [keeper], add: true)
+                 }
+                 _ = self?.lowTrash(trashed.map { $0.original })
+             })
+    }
+}
+
+// MARK: - Plugin-backed circles and region actions
+
+extension TagStore {
+    /// Start a plugin run for each `@search:` / `@similar:` circle whose
+    /// members aren't known yet; results refresh when it lands.
+    func ensureSetHits() {
+        let wanted = (querySets + activeExcludes).filter { QuerySet($0).needsPlugin }
+        if setHits.keys.contains(where: { !wanted.contains($0) }) {
+            setHits = setHits.filter { wanted.contains($0.key) }
+        }
+        for raw in wanted where setHits[raw] == nil && !setHitsInFlight.contains(raw) {
+            setHitsInFlight.insert(raw)
+            let set = QuerySet(raw)
+            let disabled = disabledPluginIDs, settings = pluginSettings
+            Task.detached(priority: .userInitiated) { [weak self] in
+                let outcome: SearchEngine.Outcome
+                switch set {
+                case .search(let text):
+                    outcome = await SearchEngine.run(query: text, library: [], disabledIDs: disabled,
+                                                     pluginSettings: settings)
+                case .similar(let paths):
+                    outcome = await SearchEngine.run(query: nil, similarTo: paths, library: [],
+                                                     disabledIDs: disabled, pluginSettings: settings)
+                default:
+                    outcome = SearchEngine.Outcome()
+                }
+                var members = Set(outcome.hits.prefix(maxSearchHits).map(\.path))
+                if case .similar(let paths) = set {
+                    members.formUnion(paths)   // a "like these" circle holds them too
+                }
+                await MainActor.run {
+                    guard let self else {
+                        return
+                    }
+                    self.setHitsInFlight.remove(raw)
+                    self.setHits[raw] = members
+                    self.refreshResults()
+                }
+            }
+        }
+    }
+
+    /// Add a non-tag circle to a diagram.
+    func addCircle(_ set: QuerySet, to group: UUID) {
+        activateGroup(group)
+        include(set.raw)
+    }
+
+    /// Years and extensions present in the library, for the Add Circle menu.
+    var circleChoices: (years: [Int], exts: [String], kinds: [FileKind]) {
+        var years = Set<Int>(), exts: [String: Int] = [:], kinds = Set<FileKind>()
+        for item in visibleItems {
+            if let year = item.year {
+                years.insert(year)
+            }
+            if !item.ext.isEmpty {
+                exts[item.ext, default: 0] += 1
+            }
+            kinds.insert(item.kind)
+        }
+        let topExts = exts.sorted { $0.value > $1.value }.prefix(12).map(\.key)
+        return (years.sorted(by: >), topExts, FileKind.allCases.filter { kinds.contains($0) && $0 != .folder })
+    }
+
+    /// Files in exactly this region of a diagram (the count its chip shows).
+    func regionItems(group id: UUID, mask: Int) -> [FileItem] {
+        guard let g = groups.first(where: { $0.id == id }) else {
+            return []
+        }
+        return visibleItems.filter { membershipMask(of: $0, over: g.sets) == mask }
+    }
+
+    /// Paint only this region.
+    func showOnlyRegion(group id: UUID, mask: Int) {
+        guard let i = groups.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        groups[i].regions = [mask]
+        refreshResults()
+    }
+
+    /// Everything the diagram matches now, minus this region. Turns a preset
+    /// mode into painted regions first.
+    func excludeRegion(group id: UUID, mask: Int) {
+        guard let i = groups.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let g = groups[i]
+        let full = (1 << g.sets.count) - 1
+        var painted = g.regions
+        if painted.isEmpty {
+            let live = vennData(g.sets).regions.keys
+            switch g.mode {
+            case .any:
+                painted = Set(live)
+            case .all, .only:
+                painted = [full]
+            }
+        }
+        painted.remove(mask)
+        guard !painted.isEmpty else {
+            return
+        }
+        groups[i].regions = painted
+        refreshResults()
+    }
+
+    /// Can this region be taken out without leaving the diagram empty?
+    func canExcludeRegion(group id: UUID, mask: Int) -> Bool {
+        guard let g = groups.first(where: { $0.id == id }) else {
+            return false
+        }
+        if !g.regions.isEmpty {
+            return g.regions.contains(mask) && g.regions.count > 1
+        }
+        return g.mode == .any && vennData(g.sets).regions.count > 1
+    }
+
+    /// Select this region's files among the current results.
+    func selectRegion(group id: UUID, mask: Int) {
+        let ids = Set(regionItems(group: id, mask: mask).map(\.id))
+        let shown = results.filter { ids.contains($0.id) }.map(\.id)
+        selection = Set(shown)
+        scrollTarget = shown.first
+    }
+
+    /// The query in a sentence: "Images tagged fashion and hair, not by".
+    var plainEnglishQuery: String? {
+        plainEnglishWords.map { words in words.map(\.text).joined() }
+    }
+
+    /// The same sentence as styled words, so the query bar can set tag names
+    /// apart from the connecting prose.
+    var plainEnglishWords: [QueryWord]? {
+        func joined(_ names: [String], by separator: String,
+                    as word: (String) -> QueryWord) -> [QueryWord] {
+            var out: [QueryWord] = []
+            for (i, name) in names.enumerated() {
+                if i > 0 {
+                    out.append(.plain(separator))
+                }
+                out.append(word(name))
+            }
+            return out
+        }
+        func setsInRegion(_ mask: Int, _ sets: [String]) -> [QueryWord] {
+            let inside = sets.enumerated().filter { mask & (1 << $0.offset) != 0 }.map { QuerySet.displayName($0.element) }
+            let outside = sets.enumerated().filter { mask & (1 << $0.offset) == 0 }.map { QuerySet.displayName($0.element) }
+            var words: [QueryWord] = inside.count == 1
+                ? [.plain("only "), .painted(inside[0])]
+                : joined(inside, by: " and ", as: QueryWord.painted)
+            if !outside.isEmpty && inside.count > 1 {
+                words.append(.plain(" (not "))
+                words += joined(outside, by: " or ", as: QueryWord.excluded)
+                words.append(.plain(")"))
+            }
+            return words
+        }
+        let nonEmpty = groups.filter { !$0.sets.isEmpty }
+        var clause: [QueryWord] = []
+        for g in nonEmpty {
+            let names = g.sets.map(QuerySet.displayName)
+            var words: [QueryWord]
+            if !g.regions.isEmpty {
+                words = []
+                let painted = g.regions.sorted { $0.nonzeroBitCount > $1.nonzeroBitCount }
+                for (i, mask) in painted.enumerated() {
+                    if i > 0 {
+                        words.append(.plain(", or "))
+                    }
+                    words += setsInRegion(mask, g.sets)
+                }
+            } else {
+                switch g.mode {
+                case .all:
+                    words = joined(names, by: " and ", as: QueryWord.set)
+                case .any:
+                    words = joined(names, by: " or ", as: QueryWord.set)
+                case .only:
+                    words = [.plain("exactly ")] + joined(names, by: " and ", as: QueryWord.set)
+                }
+            }
+            if nonEmpty.count > 1 {
+                words = [.plain("(")] + words + [.plain(")")]
+            }
+            if !clause.isEmpty {
+                clause.append(.plain(g.op == .or ? " or " : " and "))
+            }
+            clause += words
+        }
+        var parts: [[QueryWord]] = []
+        if !clause.isEmpty {
+            parts.append(clause)
+        }
+        if !activeExcludes.isEmpty {
+            parts.append([.plain("not ")]
+                         + joined(activeExcludes.map(QuerySet.displayName), by: " or ", as: QueryWord.excluded))
+        }
+        guard !parts.isEmpty else {
+            return nil
+        }
+        let noun = kindFilter.count == 1 ? kindFilter.first!.label : "Files"
+        var sentence: [QueryWord] = [.plain("\(noun) with ")]
+        for (i, part) in parts.enumerated() {
+            if i > 0 {
+                sentence.append(.plain(", "))
+            }
+            sentence += part
+        }
+        return sentence
+    }
 }

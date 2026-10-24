@@ -1,9 +1,11 @@
 import SwiftUI
 
 /// THE query bar — the single readout and editor of the current query.
-/// Chips render per diagram in bracketed segments joined by AND; the active
+/// The plain-English sentence reads the query back on top; below it, chips
+/// render per diagram in bracketed segments joined by AND or OR; the active
 /// diagram (where new tags land) has an accent border. Excludes trail after.
 ///
+///   Files with A and B, not D
 ///   [Match ▾] ( +A  +B )  AND  ( +C )  −D | N files | sort | size | Clear
 struct QueryBar: View {
     @EnvironmentObject var store: TagStore
@@ -14,30 +16,34 @@ struct QueryBar: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
-            matchMenu
-            SavedQueryMenu(canSave: !isEmptyQuery || store.searchQuery != nil)
-            TypeFilterMenu()
-            TypeFilterChips()
-            segments
-            if store.searchAvailable { SemanticSearchField() }
-            Spacer()
-            Text("\(store.results.count)")
-                .font(.headline).monospacedDigit()
-            Text("files").foregroundStyle(.secondary)
-            SortMenu()
-            Slider(value: $thumbSize, in: 90...280).frame(width: 110)
-            Button { store.exportResults() } label: {
-                Image(systemName: "square.and.arrow.up")
+        VStack(alignment: .leading, spacing: 0) {
+            QuerySentence()
+            HStack(spacing: 10) {
+                matchMenu
+                SavedQueryMenu(canSave: !isEmptyQuery || store.searchQuery != nil)
+                TypeFilterMenu()
+                TypeFilterChips()
+                segments
+                if store.similarTo != nil { SimilarChip() }
+                if store.searchAvailable { SemanticSearchField() }
+                Spacer()
+                Text("\(store.results.count)")
+                    .font(.headline).monospacedDigit()
+                Text("files").foregroundStyle(.secondary)
+                SortMenu()
+                Slider(value: $thumbSize, in: 90...280).frame(width: 110)
+                Button { store.exportResults() } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .disabled(store.results.isEmpty)
+                .help("Export all results as a folder (⌘⇧E)")
+                NewBoardButton()
+                    .labelStyle(.iconOnly)
+                Button("Clear") { store.clearQuery() }
+                    .disabled(isEmptyQuery && store.searchQuery == nil && store.similarTo == nil)
             }
-            .disabled(store.results.isEmpty)
-            .help("Export all results as a folder (⌘⇧E)")
-            NewBoardButton()
-                .labelStyle(.iconOnly)
-            Button("Clear") { store.clearQuery() }
-                .disabled(isEmptyQuery && store.searchQuery == nil)
+            .padding(8)
         }
-        .padding(8)
     }
 
     // MARK: Match menu (applies to the active diagram)
@@ -150,8 +156,12 @@ struct QueryBar: View {
         }
         return HStack(spacing: 4) {
             Image(systemName: symbol).font(.system(size: 8, weight: .bold))
-            TagColorDot(tag: tag)
-            Text(tag).font(.caption)
+            if let symbol = QuerySet(tag).symbol {
+                Image(systemName: symbol).font(.system(size: 9))
+            } else {
+                TagColorDot(tag: tag)
+            }
+            Text(QuerySet.displayName(tag)).font(.caption).lineLimit(1)
                 .strikethrough(role == .excluded)
             Button { store.clear(tag) } label: {
                 Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
@@ -167,13 +177,64 @@ struct QueryBar: View {
         .overlay(Capsule().stroke(color.opacity(0.6)))
         .onTapGesture { store.cycle(tag) }
         .contextMenu {
-            Text(tag)
+            Text(QuerySet.displayName(tag))
             Divider()
             Button("Remove from Query") { store.clear(tag) }
             Button("Exclude (NOT)") { store.exclude(tag) }
             Button("Include") { store.include(tag) }
         }
         .help("Click cycles include → exclude → off · right-click for options")
+    }
+}
+
+/// The query read back as a sentence: set names in semibold, painted Venn
+/// regions underlined in the accent colour, excludes struck through in red.
+/// A semantic search or Find Similar reads as a trailing clause. Hidden
+/// while there's no query at all.
+struct QuerySentence: View {
+    @EnvironmentObject var store: TagStore
+
+    var body: some View {
+        if let sentence {
+            sentence
+                .font(.title3)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+        }
+    }
+
+    private var sentence: Text? {
+        let words = store.plainEnglishWords
+        var text = (words ?? []).reduce(Text("")) { $0 + styled($1) }
+        if let search = store.searchQuery {
+            text = text + Text(words == nil ? "Files like " : ", ranked by ")
+                + Text("“\(search)”").fontWeight(.semibold)
+        } else if let similar = store.similarTo {
+            let what = similar.count == 1 ? similar[0].lastPathComponent : "\(similar.count) images"
+            text = text + Text(words == nil ? "Files similar to " : ", ranked by likeness to ")
+                + Text(what).fontWeight(.semibold)
+        } else if words == nil {
+            return nil
+        }
+        return text
+    }
+
+    private func styled(_ word: QueryWord) -> Text {
+        switch word {
+        case .plain(let words):
+            return Text(words).foregroundColor(.secondary)
+        case .set(let name):
+            return Text(name).fontWeight(.semibold)
+        case .painted(let name):
+            return Text(name).fontWeight(.semibold)
+                .underline(true, color: .accentColor)
+        case .excluded(let name):
+            return Text(name).foregroundColor(.secondary)
+                .strikethrough(true, color: .red)
+        }
     }
 }
 
@@ -360,7 +421,7 @@ struct SortMenu: View {
             }
         } label: {
             // A live semantic search orders by relevance regardless of the sort key.
-            Label(store.searchQuery != nil ? "Relevance" : store.sortKey.rawValue,
+            Label(store.searchQuery != nil || store.similarTo != nil ? "Relevance" : store.sortKey.rawValue,
                   systemImage: store.sortAscending ? "arrow.up.arrow.down" : "arrow.down.arrow.up")
         }
         .menuStyle(.borderlessButton)
@@ -402,5 +463,55 @@ struct SemanticSearchField: View {
         .onChange(of: store.searchQuery) { q in if q == nil { text = "" } }
         .onChange(of: store.searchFocusRequest) { _ in focused = true }
         .help("Describe what you're looking for (\"girl with spiral hair\"), then press Return. ⌘F")
+    }
+}
+
+/// "Similar to [thumbnails] ×" while Find Similar drives the results.
+struct SimilarChip: View {
+    @EnvironmentObject var store: TagStore
+
+    var body: some View {
+        let images = store.similarTo ?? []
+        HStack(spacing: 4) {
+            Text("Similar to").foregroundStyle(.secondary)
+            ForEach(images.prefix(3), id: \.self) { url in
+                SimilarThumb(url: url)
+            }
+            if images.count > 3 {
+                Text("+\(images.count - 3)").font(.caption).foregroundStyle(.secondary)
+            }
+            if store.searching {
+                ProgressView().controlSize(.small)
+            } else {
+                Button { store.clearSearch() } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.5)))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor))
+        .help(images.map(\.lastPathComponent).joined(separator: "\n"))
+    }
+}
+
+private struct SimilarThumb: View {
+    let url: URL
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image).resizable().scaledToFill()
+            } else {
+                Color.secondary.opacity(0.2)
+            }
+        }
+        .frame(width: 20, height: 20)
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+        .task(id: url) {
+            image = await ThumbnailCache.shared.thumbnail(for: url, size: 40)
+        }
     }
 }

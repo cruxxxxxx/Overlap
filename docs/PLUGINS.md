@@ -74,7 +74,7 @@ never blocks the others or the app.
 | `wantsKnownTags` | include the user's full tag vocabulary in the request |
 | `wantsLibrary` | include the whole tagged-library corpus (for similarity/clustering) |
 | `timeoutMs` | kill the process after this long |
-| `capabilities` | optional; `["suggest"]` (default) and/or `["search"]` — see [Search plugins](#search-plugins-capabilities-search) |
+| `capabilities` | optional; `["suggest"]` (default) and/or `["search"]`, `["similar"]`, `["duplicates"]` — see [Search plugins](#search-plugins-capabilities-search) |
 | `queryTimeoutMs` | optional, search plugins only: budget for one query (indexing uses `timeoutMs`) |
 
 ---
@@ -200,8 +200,24 @@ Request/response fields beyond the suggest contract:
 - A query spawns a fresh process, so keep model load cheap or cached; Overlap
   submits on Return, not per keystroke.
 
+### Find Similar (`"similar"`) and duplicates (`"duplicates"`)
+
+Two more shapes over the same index, each behind its own capability:
+
+| shape | request | expected response |
+|---|---|---|
+| **similar** | `similarTo: ["/path/a.jpg", …]` | `hits`, best first, without the input files |
+| **duplicates** | `duplicates: { "threshold": 0.95, "paths": [...] }` (`paths` omitted = whole index) | `pairs: [{ "a", "b", "score" }]` at or above `threshold` |
+
+- Similar: average the inputs' vectors. A file your index hasn't seen (a
+  connected-service preview, say) may be embedded on the spot; don't store it.
+- Duplicates: Overlap finds byte-identical copies itself and joins your pairs
+  into groups, skipping pairs the user marked "Not Duplicates". Its Strict ↔
+  Loose slider sends 0.98 … 0.90.
+- Neither is ever sent hidden-tag or vault files.
+
 `plugins/overlap-clip/` is the reference: MobileCLIP-S2 (Core ML) image + text
-encoders, downloaded on first use.
+encoders, downloaded on first use. It has all three capabilities.
 
 ---
 

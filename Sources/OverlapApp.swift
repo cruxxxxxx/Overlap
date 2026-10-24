@@ -30,13 +30,15 @@ struct OverlapApp: App {
                 }
         }
         .commands {
-            CommandGroup(replacing: .newItem) {}
-            CommandGroup(after: .saveItem) {
+            // Our items take the New slot: an empty File menu gets dropped
+            // from the menu bar altogether.
+            CommandGroup(replacing: .newItem) {
                 Button("Open Query…") { store.openQueryFile() }
                     .keyboardShortcut("o", modifiers: .command)
                 Button("Export Results as Folder…") { store.exportResults() }
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                     .disabled(store.results.isEmpty || store.exportProgress != nil)
+                FindDuplicatesMenuItem()
                 Divider()
                 BoardMenuItems()
                     .environmentObject(store)
@@ -86,6 +88,11 @@ struct OverlapApp: App {
                     NSWorkspace.shared.open(dir)
                 }
             }
+        }
+
+        Window("Duplicates", id: "duplicates") {
+            DuplicatesView()
+                .environmentObject(store)
         }
 
         Window("Connected Services", id: "sources") {
@@ -344,5 +351,14 @@ struct ContentView: View {
         if panel.runModal() == .OK, let url = panel.url {
             store.setScope(url)
         }
+    }
+}
+
+struct FindDuplicatesMenuItem: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Find Duplicates…") { openWindow(id: "duplicates") }
+            .keyboardShortcut("d", modifiers: [.command, .shift])
     }
 }

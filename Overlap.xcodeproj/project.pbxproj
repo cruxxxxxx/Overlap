@@ -18,7 +18,9 @@
 		1DEE303B00007E4F978CE52B /* FileOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA88E0C46A4E674DA1D9038A /* FileOrigin.swift */; };
 		205BA07F5ED297F3FF765B28 /* Overlap.icns in Resources */ = {isa = PBXBuildFile; fileRef = 1E9FE1CD98B00C98579C61B8 /* Overlap.icns */; };
 		277BABB8E62D61CF995442EF /* SourceContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63C8D8ABCDE9023B8DD65B4 /* SourceContract.swift */; };
+		2CF124200E8F827BC8B7F81C /* DuplicateFinder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82E5491BC21E2C729B327E1F /* DuplicateFinder.swift */; };
 		2D4AF165C4F11F21C17491F6 /* ThumbnailCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 956C68E832660A3C577EDC5B /* ThumbnailCell.swift */; };
+		2E778C2C4AFF5969153ACDBE /* DuplicatesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AC120FACF53DA1A7CBA9A45 /* DuplicatesView.swift */; };
 		318C4279F6D04EDC358684B5 /* BoardElements.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6EB8ADD4AA74EA1564E800B /* BoardElements.swift */; };
 		35F6A8E4B86178C3C575BA5F /* SourceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F64C2AF76E0F3368065CD888 /* SourceStore.swift */; };
 		41569B206A51BC0ABE25BE60 /* OverlapApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E2D644A019FBE86AB4F2C6 /* OverlapApp.swift */; };
@@ -59,6 +61,7 @@
 		F3FB9CE9932A36775699D98E /* Tutorial.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0267C898CAAC4FDC62EDCA5E /* Tutorial.swift */; };
 		F6239EA6B9C2F111EFB98C18 /* demo-ocean.png in Resources */ = {isa = PBXBuildFile; fileRef = 6CA8F00A68A5A59D937E5505 /* demo-ocean.png */; };
 		F7081E5BBEE896BF43DDE3B9 /* demo-desert.png in Resources */ = {isa = PBXBuildFile; fileRef = EFFE39D29F1F0A35EC68964D /* demo-desert.png */; };
+		F799815E3B832F7EEA76AF26 /* VennSets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 759E2ECC5CA7939F9551D078 /* VennSets.swift */; };
 		F7B8B6A3956B1BFE0EBFAD68 /* demo-city.png in Resources */ = {isa = PBXBuildFile; fileRef = 362F9A1380B4B7A8ABB4F812 /* demo-city.png */; };
 		F9648BB635CDD8D8B7091ABC /* RemoteBrowse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51052B34451D601CB2741769 /* RemoteBrowse.swift */; };
 		FB57CEB2EFC336378942AD9F /* VennLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = F86689191C11367AB56AD0B9 /* VennLayout.swift */; };
@@ -91,10 +94,13 @@
 		657AC1CAC1FDEA2389E585EA /* FilePreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePreview.swift; sourceTree = "<group>"; };
 		6C46672A0282E0825ED33DD2 /* demo-night.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "demo-night.png"; sourceTree = "<group>"; };
 		6CA8F00A68A5A59D937E5505 /* demo-ocean.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "demo-ocean.png"; sourceTree = "<group>"; };
+		759E2ECC5CA7939F9551D078 /* VennSets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VennSets.swift; sourceTree = "<group>"; };
 		761E8D9B9CAA2007644CA625 /* MoodBoardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoodBoardView.swift; sourceTree = "<group>"; };
 		7FCB2B4B7D0A2C2059AEBE03 /* TagStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagStore.swift; sourceTree = "<group>"; };
 		80CDDCF7E04C0B8957EB8CEF /* PluginRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginRegistry.swift; sourceTree = "<group>"; };
+		82E5491BC21E2C729B327E1F /* DuplicateFinder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicateFinder.swift; sourceTree = "<group>"; };
 		89A47F300D6D684652E8A861 /* QueryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryBar.swift; sourceTree = "<group>"; };
+		8AC120FACF53DA1A7CBA9A45 /* DuplicatesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicatesView.swift; sourceTree = "<group>"; };
 		956C68E832660A3C577EDC5B /* ThumbnailCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailCell.swift; sourceTree = "<group>"; };
 		97BFEF2B3C6A50853C059702 /* PalettePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PalettePanel.swift; sourceTree = "<group>"; };
 		9B54048E8F77A2DD3EF9E854 /* MediaEmbed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaEmbed.swift; sourceTree = "<group>"; };
@@ -171,6 +177,8 @@
 				0FBEA9D5B8043811935418C0 /* BoardLayout.swift */,
 				EBCAFC9632458CA597C2AC07 /* BoardTile.swift */,
 				B22DED0C110EF7F8CF7C2E6B /* CirclePack.swift */,
+				82E5491BC21E2C729B327E1F /* DuplicateFinder.swift */,
+				8AC120FACF53DA1A7CBA9A45 /* DuplicatesView.swift */,
 				19747B4E7F1808FFF2AE64A5 /* ExploreView.swift */,
 				CA88E0C46A4E674DA1D9038A /* FileOrigin.swift */,
 				657AC1CAC1FDEA2389E585EA /* FilePreview.swift */,
@@ -217,6 +225,7 @@
 				DC9A63DFD67472CDE62C5C3C /* TVExceptionCatcher.h */,
 				FD655206D88A960895B7C619 /* TVExceptionCatcher.m */,
 				F86689191C11367AB56AD0B9 /* VennLayout.swift */,
+				759E2ECC5CA7939F9551D078 /* VennSets.swift */,
 				A429FB3EBD72A5FAAD05BDEE /* VennView.swift */,
 			);
 			path = Sources;
@@ -313,6 +322,8 @@
 				D06197FBAEC678561354E12C /* BoardLayout.swift in Sources */,
 				655A4EF6A0012A8C9822C474 /* BoardTile.swift in Sources */,
 				7BA82D0875309D6CA0F6B7D3 /* CirclePack.swift in Sources */,
+				2CF124200E8F827BC8B7F81C /* DuplicateFinder.swift in Sources */,
+				2E778C2C4AFF5969153ACDBE /* DuplicatesView.swift in Sources */,
 				E79E337DC39FF228D4472737 /* ExploreView.swift in Sources */,
 				1DEE303B00007E4F978CE52B /* FileOrigin.swift in Sources */,
 				A4AF5249C04EA23A4717C458 /* FilePreview.swift in Sources */,
@@ -357,6 +368,7 @@
 				09A8521EA9BC3B7980F57DE9 /* TutorialHost.swift in Sources */,
 				C14AFAA093CF29C2E64BFBC7 /* TutorialOverlay.swift in Sources */,
 				FB57CEB2EFC336378942AD9F /* VennLayout.swift in Sources */,
+				F799815E3B832F7EEA76AF26 /* VennSets.swift in Sources */,
 				B05CA40DE972117A9C3B8AFF /* VennView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

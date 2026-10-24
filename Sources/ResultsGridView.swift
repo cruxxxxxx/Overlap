@@ -385,6 +385,12 @@ struct ResultsGridView: View {
 
     /// Returns nil to swallow the event, or the event to let it pass through.
     private func handleKey(_ event: NSEvent) -> NSEvent? {
+        // Only the main window (and Quick Look over it): other windows, like
+        // Duplicates or a board, must never trash or retag the grid selection.
+        if let window = event.window, let main = MainWindowRef.window, window !== main,
+           !(window is QLPreviewPanel) {
+            return event
+        }
         // ⌘F focuses the semantic search field — even from another text field
         // (the sidebar filter is first responder at launch), so it goes before
         // the text-field pass-through. Handled here, not as a menu shortcut, so
@@ -428,6 +434,13 @@ struct ResultsGridView: View {
         // ⌘S saves remote previews to the library.
         if store.mode == .remote, event.keyCode == 1, event.modifierFlags.contains(.command) {
             remote.save(store.selectedURLs())
+            return nil
+        }
+
+        // ⌘L: Find Similar to the selection (from remote too: searches the library).
+        if event.keyCode == 37, event.modifierFlags.contains(.command), store.similarAvailable,
+           store.mode != .queue, !store.selection.isEmpty {
+            store.findSimilar(store.selectedURLs())
             return nil
         }
 
@@ -760,7 +773,15 @@ struct ResultsGridView: View {
                     .foregroundStyle(.secondary)
                 Text("Add a watched folder, or all found files are already tagged")
                     .font(.caption).foregroundStyle(.tertiary)
-            } else if let q = store.searchQuery {
+            } else if store.similarTo != nil, store.searchStatus == .ok {
+                Image(systemName: "photo.stack").font(.system(size: 40)).foregroundStyle(.tertiary)
+                Text(store.searching ? "Finding similar images…" : "Nothing similar enough")
+                    .foregroundStyle(.secondary)
+                if !store.searching {
+                    Text("Lower Find Similar cutoff in Plugin Settings, or loosen the tag query")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+            } else if let q = store.searchQuery ?? store.similarTo.map({ _ in "these images" }) {
                 Image(systemName: "sparkle.magnifyingglass").font(.system(size: 40)).foregroundStyle(.tertiary)
                 switch store.searchStatus {
                 case .noPlugin:
@@ -891,6 +912,10 @@ struct ResultsGridView: View {
             QuickLookOpener.open(targetURLs(for: item))
         }
         Button("Open") { NSWorkspace.shared.open(item.url) }
+        if item.kind == .image, store.similarAvailable {
+            Button("Find Similar") { store.findSimilar(targetURLs(for: item)) }
+                .keyboardShortcut("l", modifiers: .command)
+        }
         Button("Reveal in Finder") {
             NSWorkspace.shared.activateFileViewerSelecting(targetURLs(for: item))
         }

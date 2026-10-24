@@ -221,6 +221,15 @@ struct FileItem: Identifiable, Hashable {
             size: vals?.fileSize.map(Int64.init),
             contentType: vals?.contentType)
     }
+
+    /// `load` after the file changed on disk. A URL caches its resource values,
+    /// and TagIO writes the xattr directly, so reusing an item's URL would
+    /// otherwise read back the tags from before the edit.
+    static func reload(_ url: URL) -> FileItem {
+        var fresh = url
+        fresh.removeAllCachedResourceValues()
+        return load(fresh)
+    }
 }
 
 /// A node in the tag tree. `fullPath` is the complete tag string up to this
@@ -279,5 +288,21 @@ final class TagNode: Identifiable {
             node.count = total
         }
         return total
+    }
+}
+
+/// One piece of the plain-English query sentence. Connecting prose is
+/// `.plain`; set names carry their role so the query band can style them.
+enum QueryWord: Hashable {
+    case plain(String)
+    case set(String)
+    case painted(String)
+    case excluded(String)
+
+    var text: String {
+        switch self {
+        case .plain(let text), .set(let text), .painted(let text), .excluded(let text):
+            return text
+        }
     }
 }

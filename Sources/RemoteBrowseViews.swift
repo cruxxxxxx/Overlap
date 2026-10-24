@@ -115,6 +115,9 @@ struct RemoteItemMenu: View {
                     Button(tag) { store.addTag(tag, to: targets) }
                 }
             }
+            if store.similarAvailable {
+                Button("Find Similar in My Library") { store.findSimilar(targets) }
+            }
             Button("Show \((remote.info?.noun ?? "collection").capitalized)s It's In") {
                 remote.showConnections(of: url)
             }

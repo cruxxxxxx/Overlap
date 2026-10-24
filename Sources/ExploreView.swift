@@ -1,11 +1,16 @@
 import SwiftUI
 
-/// The Explore sidebar: one or more Venn diagrams (ANDed together) on top,
+/// The Explore sidebar: one or more Venn diagrams (joined by AND or OR) on top,
 /// the circle-pack tag map below. Tap a leaf in the map to add it to the
 /// active diagram; click a diagram to activate it; paint regions to shape
 /// each diagram's logic. All of it edits the one query the QueryBar shows.
 struct ExploreView: View {
     @EnvironmentObject var store: TagStore
+    @EnvironmentObject var boards: BoardStore
+    @Environment(\.openWindow) private var openWindow
+    @AppStorage("venn.showCounts") private var showAllCounts = false
+    @State private var searchCircleGroup: UUID?
+    @State private var searchCircleText = ""
     @State private var browse: [String] = []   // drill path within the co-occur tree
     @State private var vennZoom: [UUID: CGFloat] = [:]
     @State private var stackHeight: CGFloat = 260
@@ -91,13 +96,7 @@ struct ExploreView: View {
             }
             .padding(12)
             Divider()
-            VennView(tags: group.sets, totals: d.totals, regions: d.regions,
-                     selectedRegions: group.regions,
-                     onToggleRegion: { store.toggleRegion(group: group.id, mask: $0) },
-                     onRemoveTag: { store.clear($0) },
-                     onExcludeTag: { store.exclude($0) },
-                     zoom: zoomBinding(group.id),
-                     height: h - 110)
+            diagram(group, data: d, height: h - 110)
             regionChips(group, regions: d.regions)
         }
         .frame(width: w, height: h)
@@ -120,8 +119,108 @@ struct ExploreView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
                 .padding(.vertical, 6)
-                .help("A new diagram ANDs with the others")
+                .help("A new diagram combines with the others (AND; click its badge for OR)")
             }
+        }
+    }
+
+    private func diagram(_ group: VennGroup, data d: (totals: [Int], regions: [Int: Int]),
+                         height: CGFloat) -> some View {
+        VennView(tags: group.sets, totals: d.totals, regions: d.regions,
+                 selectedRegions: group.regions,
+                 onToggleRegion: { store.toggleRegion(group: group.id, mask: $0) },
+                 onRemoveTag: { store.clear($0) },
+                 onExcludeTag: { store.exclude($0) },
+                 regionMenu: { AnyView(regionMenu(group, mask: $0)) },
+                 showAllCounts: showAllCounts,
+                 zoom: zoomBinding(group.id),
+                 height: height)
+    }
+
+    /// Right-click on a region (in the diagram or its chip).
+    @ViewBuilder
+    private func regionMenu(_ group: VennGroup, mask: Int) -> some View {
+        let count = store.vennData(group.sets).regions[mask] ?? 0
+        Text("\(regionLabel(mask, sets: group.sets)) · \(count)")
+        Button("Show Only This Region") { store.showOnlyRegion(group: group.id, mask: mask) }
+        Button("Exclude This Region") { store.excludeRegion(group: group.id, mask: mask) }
+            .disabled(!store.canExcludeRegion(group: group.id, mask: mask))
+        Button("Select These in Results") { store.selectRegion(group: group.id, mask: mask) }
+        Divider()
+        Menu("Tag These") {
+            ForEach(store.tagCounts.keys.sorted(), id: \.self) { tag in
+                Button(tag) { store.addTag(tag, to: store.regionItems(group: group.id, mask: mask).map(\.url)) }
+            }
+            Divider()
+            Button("New Tag…") {
+                if let tag = TextPrompt.ask("Tag \(count) files", placeholder: "Tag name") {
+                    store.addTag(tag, to: store.regionItems(group: group.id, mask: mask).map(\.url))
+                }
+            }
+        }
+        Button("New Board from These") {
+            store.showOnlyRegion(group: group.id, mask: mask)
+            Task { @MainActor in
+                if let id = await boards.createFromResults(store) {
+                    openWindow(id: "board", value: id)
+                }
+            }
+        }
+    }
+
+    /// "+" on a diagram: circles that aren't tags.
+    private func addCircleMenu(_ group: VennGroup) -> some View {
+        let choices = store.circleChoices
+        let images = store.shareableForSource(store.selectedURLs()).allowed.filter { FileKind.of(contentType: nil, ext: $0.pathExtension) == .image }
+        return Menu {
+            if store.searchAvailable {
+                Button("Semantic Search…") {
+                    searchCircleText = ""
+                    searchCircleGroup = group.id
+                }
+            }
+            if store.similarAvailable {
+                Button(images.count == 1 ? "Like the Selected Image" : "Like the \(images.count) Selected Images") {
+                    store.addCircle(.similar(images.map(\.path)), to: group.id)
+                }
+                .disabled(images.isEmpty)
+            }
+            Menu("File Type") {
+                ForEach(choices.kinds) { kind in
+                    Button(kind.label) { store.addCircle(.kind(kind), to: group.id) }
+                }
+            }
+            Menu("Extension") {
+                ForEach(choices.exts, id: \.self) { ext in
+                    Button(".\(ext)") { store.addCircle(.ext(ext), to: group.id) }
+                }
+            }
+            Menu("Year") {
+                ForEach(choices.years, id: \.self) { year in
+                    Button(String(year)) { store.addCircle(.year(year), to: group.id) }
+                }
+            }
+        } label: {
+            Image(systemName: "plus.circle").font(.caption2)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .foregroundStyle(.secondary)
+        .help("Add a circle that isn't a tag: a search, similar images, a type or a year")
+        .popover(isPresented: Binding(get: { searchCircleGroup == group.id },
+                                      set: { if !$0 { searchCircleGroup = nil } })) {
+            TextField("Describe what's in the images", text: $searchCircleText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 260)
+                .padding(10)
+                .onSubmit {
+                    let text = searchCircleText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !text.isEmpty {
+                        store.addCircle(.search(text), to: group.id)
+                    }
+                    searchCircleGroup = nil
+                }
         }
     }
 
@@ -147,7 +246,13 @@ struct ExploreView: View {
                     .help("Click to toggle AND/OR with the previous diagram")
                 }
                 Spacer()
+                addCircleMenu(group)
                 if !group.sets.isEmpty {
+                    Button { showAllCounts.toggle() } label: {
+                        Image(systemName: showAllCounts ? "number.circle.fill" : "number.circle").font(.caption2)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help(showAllCounts ? "Show counts only on hover" : "Show every region's count")
                     Button { expandedGroupID = group.id } label: {
                         Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption2)
                     }
@@ -177,13 +282,7 @@ struct ExploreView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
             } else {
-                VennView(tags: group.sets, totals: d.totals, regions: d.regions,
-                         selectedRegions: group.regions,
-                         onToggleRegion: { store.toggleRegion(group: group.id, mask: $0) },
-                         onRemoveTag: { store.clear($0) },
-                         onExcludeTag: { store.exclude($0) },
-                         zoom: zoomBinding(group.id),
-                         height: diagramHeight)
+                diagram(group, data: d, height: diagramHeight)
                 regionChips(group, regions: d.regions)
             }
         }
@@ -203,7 +302,7 @@ struct ExploreView: View {
     /// that are geometrically unreachable in the diagram.
     private func regionChips(_ group: VennGroup, regions: [Int: Int]) -> some View {
         let sorted = regions.filter { $0.value > 0 }
-            .sorted { $0.value > $1.value }.prefix(40)
+            .sorted { $0.value > $1.value }
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 5) {
                 ForEach(Array(sorted), id: \.key) { mask, cnt in
@@ -220,6 +319,7 @@ struct ExploreView: View {
                         .foregroundStyle(on ? Color.white : Color.primary)
                     }
                     .buttonStyle(.plain)
+                    .contextMenu { regionMenu(group, mask: mask) }
                 }
             }
             .padding(.horizontal, 8).padding(.bottom, 5)
@@ -229,7 +329,7 @@ struct ExploreView: View {
     private func regionLabel(_ mask: Int, sets: [String]) -> String {
         let names = sets.enumerated()
             .filter { mask & (1 << $0.offset) != 0 }
-            .map { $0.element.split(separator: "/").last.map(String.init) ?? $0.element }
+            .map { QuerySet.shortName($0.element) }
         return names.count == sets.count ? "all" : names.joined(separator: "·")
     }
 
@@ -278,5 +378,25 @@ struct ExploreView: View {
             Text("\(store.results.count) imgs").font(.caption).foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 8).padding(.vertical, 4)
+    }
+}
+
+/// A one-line text prompt (an alert with a field).
+enum TextPrompt {
+    @MainActor
+    static func ask(_ title: String, placeholder: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.placeholderString = placeholder
+        alert.accessoryView = field
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 }
