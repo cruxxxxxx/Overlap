@@ -255,7 +255,7 @@ struct ServicesMenuBar: View {
                 if on {
                     ids.append(pluginID)
                 } else if store.mode == .remote && remote.pluginID == pluginID {
-                    store.setMode(.tags)
+                    store.showTagsTab()
                 }
                 shown = ids.joined(separator: ",")
             })

@@ -125,6 +125,10 @@ swiftc Sources/PluginContract.swift Sources/SourceContract.swift Sources/PluginP
     Sources/FileOrigin.swift Sources/SourceEngine.swift Sources/TagIO.swift Sources/PluginRegistry.swift \
     "$scratch/main.swift" -o "$scratch/test-sources" 2>/dev/null
 "$scratch/test-sources" | tail -1
+mkdir -p "$scratch/explore"
+cp scripts/test-explore.swift "$scratch/explore/main.swift"
+swiftc Sources/ExploreProfile.swift Sources/ExploreKeys.swift "$scratch/explore/main.swift" -o "$scratch/test-explore" 2>/dev/null
+"$scratch/test-explore" | tail -1
 
 # ---------- build, sign, notarize ----------
 if [ "$SKIP_BUILD" -eq 1 ]; then

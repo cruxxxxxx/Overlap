@@ -5,6 +5,7 @@ import Quartz
 struct ResultsGridView: View {
     @EnvironmentObject var store: TagStore
     @EnvironmentObject var remote: RemoteBrowseModel
+    @EnvironmentObject var explore: ExploreModel
     @State private var thumbSize: CGFloat = 150
     @State private var showNewTag = false
     @State private var newTagName = ""
@@ -13,6 +14,7 @@ struct ResultsGridView: View {
     @State private var tagInput = ""
     @State private var keepSuggestionsOnSelectionChange = false
     @State private var showSuggestionSources = false
+    @State private var carouselIndex = 0
     @FocusState private var tagFieldFocused: Bool
 
     private var columns: [GridItem] {
@@ -39,12 +41,16 @@ struct ResultsGridView: View {
                 queueBar
             } else if store.mode == .remote {
                 RemoteBar(thumbSize: $thumbSize)
+            } else if store.mode == .explore {
+                ExploreBar(thumbSize: $thumbSize)
             } else {
                 QueryBar(thumbSize: $thumbSize)
             }
             Divider()
             if store.results.isEmpty {
                 emptyState
+            } else if store.showPreview && store.carouselLayout {
+                carousel
             } else if store.showPreview {
                 HSplitView {
                     currentGrid.frame(minWidth: 220)
@@ -396,7 +402,7 @@ struct ResultsGridView: View {
         // the text-field pass-through. Handled here, not as a menu shortcut, so
         // it can't collide with Edit ▸ Find.
         if event.keyCode == 3, event.modifierFlags.contains(.command),
-           !event.modifierFlags.contains(.shift), store.searchAvailable, store.mode != .queue, store.mode != .remote {
+           !event.modifierFlags.contains(.shift), store.searchAvailable, store.mode != .queue, store.mode != .remote, store.mode != .explore {
             store.requestSearchFocus()
             return nil
         }
@@ -409,6 +415,11 @@ struct ResultsGridView: View {
             if event.modifierFlags.contains(.shift) { store.performRedo() }
             else { store.performUndo() }
             return nil
+        }
+
+        // Explore's keys work over Quick Look too: page with the arrows, press L.
+        if store.mode == .explore, let handled = handleExploreKey(event) {
+            return handled ? nil : event
         }
 
         // Quick Look up: it pages with ←/→ itself; we add ↑/↓ = jump one row.
@@ -461,6 +472,41 @@ struct ResultsGridView: View {
         }
     }
 
+    /// The keys from Settings. A new batch never draws over Quick Look, which
+    /// would be left showing the old one. nil = not Explore's key.
+    private func handleExploreKey(_ event: NSEvent) -> Bool? {
+        guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+              let action = ExploreKeyBindings.shared.keymap.action(forKeyCode: event.keyCode) else {
+            return nil
+        }
+        let panel = QLPreviewPanel.sharedPreviewPanelExists() ? QLPreviewPanel.shared() : nil
+        let openPanel = panel?.isVisible == true ? panel : nil
+        switch action {
+        case .like:
+            explore.toggleLike(store.selectedURLs())
+        case .less:
+            explore.lessLikeThis(store.selectedURLs())
+        case .nextImage:
+            if let openPanel {
+                openPanel.currentPreviewItemIndex = min(openPanel.currentPreviewItemIndex + 1, max(store.results.count - 1, 0))
+            } else {
+                explore.advance()
+            }
+        case .nextBatch:
+            if openPanel != nil {
+                return nil
+            }
+            explore.next()
+        case .quickLook:
+            if let openPanel {
+                openPanel.orderOut(nil)
+            } else {
+                quickLook()
+            }
+        }
+        return true
+    }
+
     private var primarySelected: FileItem? {
         store.results.first { store.selection.contains($0.id) }
     }
@@ -510,6 +556,9 @@ struct ResultsGridView: View {
     private func quickLook(_ item: FileItem? = nil) {
         let all = store.results
         guard !all.isEmpty else { return }
+        if store.mode == .explore {
+            explore.noteOpened(item.map { [$0.url] } ?? store.selectedURLs())
+        }
         let ids = all.map(\.id)
         let startID = item?.id ?? primarySelected?.id
         let idx = all.firstIndex { $0.id == startID } ?? 0
@@ -539,19 +588,12 @@ struct ResultsGridView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 12) {
                         ForEach(store.results) { item in
-                            ThumbnailCell(item: item, size: thumbSize,
-                                          selected: store.selection.contains(item.id))
-                                .overlay(alignment: .topTrailing) { savedBadge(item) }
-                                .id(item.id)
-                                .onTapGesture(count: 2) { handleOpen(item) }
-                                .onTapGesture { handleClick(item) }
-                                .onDrag { NSItemProvider(object: item.url as NSURL) }
-                                .contextMenu { contextMenu(for: item) }
-                                .onAppear { loadMoreIfLast(item) }
+                            resultCell(item, size: thumbSize)
                         }
                     }
                     .padding(12)
                 }
+                .id(explorePageKey)
                 .onChange(of: store.scrollTarget) { target in
                     if let target {
                         withAnimation(.easeInOut(duration: 0.12)) {
@@ -565,6 +607,109 @@ struct ResultsGridView: View {
             .onChange(of: thumbSize) { _ in store.columnsHint = computeColumns(geo.size.width) }
         }
         .tutorialAnchor(.grid)
+    }
+
+    /// A new Explore page gets a fresh scroll view: scrollTo can't reach lazy
+    /// cells that arrive in the same update, so it wouldn't reliably jump back.
+    private var explorePageKey: String {
+        store.mode == .explore ? "\(explore.batchIndex)-\(explore.showingLiked)" : ""
+    }
+
+    private func resultCell(_ item: FileItem, size: CGFloat) -> some View {
+        ThumbnailCell(item: item, size: size, selected: store.selection.contains(item.id))
+            .overlay(alignment: .topTrailing) { savedBadge(item) }
+            .overlay(alignment: .topTrailing) {
+                if store.mode == .explore { ExploreLikeButton(url: item.url) }
+            }
+            .id(item.id)
+            .onTapGesture(count: 2) { handleOpen(item) }
+            .onTapGesture { handleClick(item) }
+            .onDrag { NSItemProvider(object: item.url as NSURL) }
+            .contextMenu { contextMenu(for: item) }
+            .onAppear { loadMoreIfLast(item) }
+    }
+
+    // MARK: Carousel
+
+    /// The strip's thumbnails run smaller than the grid's: the slider still
+    /// sizes them, and the image on top keeps most of the height.
+    private var carouselThumbSize: CGFloat { thumbSize * 0.7 }
+
+    private var carousel: some View {
+        VStack(spacing: 0) {
+            PreviewPane(item: primarySelected, compact: true)
+                .overlay(alignment: .topTrailing) {
+                    if store.mode == .explore, let item = primarySelected {
+                        ExploreLikeButton(url: item.url).font(.title2).padding(6)
+                    }
+                }
+                .frame(maxHeight: .infinity)
+            Divider()
+            carouselStrip
+        }
+        .onAppear {
+            store.columnsHint = 1   // ↑/↓ step one image, like ←/→
+            selectFirstIfNothingShowing()
+        }
+        .onChange(of: store.results.first?.id) { _ in selectFirstResult() }
+        .onChange(of: store.selection) { selection in
+            if selection.isEmpty {
+                // Wait a turn: new results empty the selection too, and then
+                // selectFirstResult wins over the old position.
+                DispatchQueue.main.async {
+                    if store.selection.isEmpty {
+                        selectResult(at: carouselIndex)
+                    }
+                }
+            } else if let index = store.results.firstIndex(where: { selection.contains($0.id) }) {
+                carouselIndex = index
+            }
+        }
+    }
+
+    private var carouselStrip: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: 10) {
+                    ForEach(store.results) { item in
+                        resultCell(item, size: carouselThumbSize)
+                    }
+                }
+                .padding(10)
+            }
+            .id(store.results.first?.id)
+            .onChange(of: store.scrollTarget) { target in
+                if let target {
+                    withAnimation(.easeInOut(duration: 0.12)) {
+                        proxy.scrollTo(target, anchor: .center)
+                    }
+                }
+            }
+        }
+        .frame(height: carouselThumbSize + 44)
+        .tutorialAnchor(.grid)
+    }
+
+    /// The top half is never blank while there's something to show.
+    private func selectFirstIfNothingShowing() {
+        if primarySelected == nil {
+            selectFirstResult()
+        }
+    }
+
+    /// New results start at the beginning; removing the first image lands here too.
+    private func selectFirstResult() {
+        selectResult(at: 0)
+    }
+
+    private func selectResult(at index: Int) {
+        guard !store.results.isEmpty else {
+            return
+        }
+        let id = store.results[min(index, store.results.count - 1)].id
+        store.selection = [id]
+        store.selectionAnchor = id
+        store.scrollTarget = id
     }
 
     /// Remote previews already saved to the library get a check.
@@ -767,6 +912,8 @@ struct ResultsGridView: View {
         VStack(spacing: 8) {
             if store.mode == .remote {
                 remoteEmptyState
+            } else if store.mode == .explore {
+                ExploreEmptyState()
             } else if store.mode == .queue {
                 Image(systemName: "tray").font(.system(size: 40)).foregroundStyle(.tertiary)
                 Text("Queue empty")
@@ -862,6 +1009,9 @@ struct ResultsGridView: View {
         if store.mode == .remote && remote.open(item.url) {
             return
         }
+        if store.mode == .explore {
+            explore.noteOpened(targetURLs(for: item))
+        }
         if let media = FileOrigin.media(of: item.url), media.opensSource, let link = media.sourceLink {
             NSWorkspace.shared.open(link)
             return
@@ -904,6 +1054,12 @@ struct ResultsGridView: View {
 
     @ViewBuilder
     private func libraryMenu(for item: FileItem) -> some View {
+        if store.mode == .explore {
+            let targets = targetURLs(for: item)
+            Button(explore.isLiked(item.url) ? "Unlike" : "Like") { explore.toggleLike(targets) }
+            Button("Less Like This") { explore.lessLikeThis(targets) }
+            Divider()
+        }
         if let media = FileOrigin.media(of: item.url), let link = media.sourceLink {
             Button(media.openLabel) { NSWorkspace.shared.open(link) }
         }

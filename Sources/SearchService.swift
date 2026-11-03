@@ -27,6 +27,27 @@ enum SearchEngine {
         }
     }
 
+    struct ExploreOutcome {
+        var result: ExploreResult?
+        var indexedCount: Int?
+        var ranPlugin = false
+    }
+
+    /// An Explore draw from the first enabled plugin that can do it. Vectors
+    /// from different encoders don't compare, so it's never merged across plugins.
+    nonisolated static func explore(_ query: ExploreQuery, disabledIDs: Set<String>,
+                                    pluginSettings: [String: [String: SettingValue]]) async -> ExploreOutcome {
+        guard let plugin = searchPlugins(disabledIDs: disabledIDs, capability: "explore").first else {
+            return ExploreOutcome()
+        }
+        let request = SuggestRequest(files: [], knownTags: nil, library: nil,
+                                     settings: TagStore.effectiveSettings(for: plugin, stored: pluginSettings),
+                                     explore: query)
+        let timeout = plugin.manifest.queryTimeoutMs ?? min(plugin.manifest.timeoutMs, 60_000)
+        let response = SuggestionEngine.runProcess(plugin, request: request, timeoutMs: timeout, onProgress: nil)
+        return ExploreOutcome(result: response?.explore, indexedCount: response?.indexedCount, ranPlugin: true)
+    }
+
     /// Runs off-main (call from a detached task).
     nonisolated static func run(query: String?, similarTo: [String]? = nil, library: [LibraryItem],
                                 disabledIDs: Set<String> = [],

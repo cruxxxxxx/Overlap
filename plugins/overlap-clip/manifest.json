@@ -5,7 +5,7 @@
   "protocolVersion": 1,
   "exec": "overlap-clip",
   "handles": ["image"],
-  "capabilities": ["search", "similar", "duplicates"],
+  "capabilities": ["search", "similar", "duplicates", "explore"],
   "batch": true,
   "wantsKnownTags": false,
   "wantsLibrary": true,

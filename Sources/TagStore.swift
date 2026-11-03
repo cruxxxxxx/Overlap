@@ -74,6 +74,12 @@ final class TagStore: ObservableObject {
     @Published private(set) var similarTo: [URL]?
     /// A plugin with the `similar` capability is installed + enabled.
     @Published private(set) var similarAvailable = false
+    /// A plugin with the `explore` capability is installed + enabled.
+    @Published private(set) var exploreAvailable = false
+    /// The Explore page's current files, in display order.
+    private var exploreURLs: [URL] = []
+    /// Runs before the vault reconciles: the taste profile drops hidden files.
+    var onPrivacyChange: (() -> Void)?
     @Published private(set) var searching = false
     @Published private(set) var searchStatus: SearchStatus = .ok
     /// A search plugin is installed + enabled (cached; discovery hits disk).
@@ -212,6 +218,27 @@ final class TagStore: ObservableObject {
     @Published var tagFocusRequest = 0   // bump to focus the quick-tag field
     @Published var showPreview = false {
         didSet { UserDefaults.standard.set(showPreview, forKey: "showPreview") }
+    }
+    /// The preview sits above a one-row strip instead of beside the grid.
+    private var lastLibraryMode: LibraryMode = .tags
+    @Published private(set) var tagsAsDiagram: Bool = UserDefaults.standard.bool(forKey: "tagsAsDiagram") {
+        didSet { UserDefaults.standard.set(tagsAsDiagram, forKey: "tagsAsDiagram") }
+    }
+    /// Off, beside the grid, or on top (carousel). Carousel is remembered
+    /// while the preview is off.
+    var previewLayout: PreviewLayout {
+        get {
+            showPreview ? (carouselLayout ? .top : .side) : .off
+        }
+        set {
+            showPreview = newValue != .off
+            if newValue != .off {
+                carouselLayout = newValue == .top
+            }
+        }
+    }
+    @Published var carouselLayout: Bool = UserDefaults.standard.bool(forKey: "carouselLayout") {
+        didSet { UserDefaults.standard.set(carouselLayout, forKey: "carouselLayout") }
     }
     var columnsHint = 1
 
@@ -648,7 +675,7 @@ final class TagStore: ObservableObject {
         applyCounts(counts)
     }
 
-    // MARK: - Explore (co-occurrence)
+    // MARK: - Find (co-occurrence)
 
     /// Tags that co-occur with the current include set (AND). Counts = how many
     /// of the current matching images also carry that tag. Linear in the subset.
@@ -842,6 +869,19 @@ final class TagStore: ObservableObject {
         refreshResults()
     }
 
+    /// Explore's All Tags: the whole library, so tag defaults and the type
+    /// filter go too, not just what was clicked.
+    func clearQueryEntirely() {
+        clearSearch(refresh: false)
+        let g = VennGroup()
+        groups = [g]
+        activeGroupID = g.id
+        queryExcludes = []
+        kindFilter = []
+        extFilter = []
+        refreshResults()
+    }
+
     /// Seed the (freshly cleared) query from each tag's default stance. Mutates
     /// the query state directly — the caller triggers the single refresh.
     private func applyQueryDefaults() {
@@ -923,7 +963,8 @@ final class TagStore: ObservableObject {
     /// one), and the search (run, or cleared when it has none).
     func applyQuery(_ q: SavedQuery) {
         if mode == .queue || mode == .remote {
-            mode = .tags
+            mode = tagsAsDiagram ? .find : .tags
+            lastLibraryMode = mode
             selection = []
         }
         groups = q.groups.isEmpty ? [VennGroup()] : q.groups
@@ -1337,6 +1378,7 @@ final class TagStore: ObservableObject {
     /// vault files that no longer carry one move back to where they came from.
     /// Runs off-main with progress; attaches the vault briefly when locked.
     private func reconcileVault() {
+        onPrivacyChange?()
         guard vaultEnabled else { return }
         guard !vaultBusy else {
             vaultNeedsReconcile = true
@@ -1552,10 +1594,6 @@ final class TagStore: ObservableObject {
 
     // MARK: - The single evaluator
 
-    private func isPrefix(_ tag: String) -> Bool {
-        tagCounts[tag] == nil && tagCounts.keys.contains { $0.hasPrefix(tag + "/") }
-    }
-
     private func hasTag(_ item: FileItem, _ tag: String) -> Bool {
         if item.tagSet.contains(tag) { return true }
         if tag.hasPrefix("@") {
@@ -1572,7 +1610,8 @@ final class TagStore: ObservableObject {
                 return setHits[tag]?.contains(item.id) ?? false
             }
         }
-        return isPrefix(tag) && item.tagSet.contains { $0.hasPrefix(tag + "/") }
+        // A parent means everything beneath it, as its rolled-up count says.
+        return item.tagSet.contains { $0.hasPrefix(tag + "/") }
     }
 
     /// Does a query set name this tag (itself, or as its parent)?
@@ -1594,6 +1633,10 @@ final class TagStore: ObservableObject {
         ensureSetHits()
         if mode == .remote {
             results = remoteItems
+            return
+        }
+        if mode == .explore {
+            results = resolvedExploreItems()
             return
         }
         if mode == .queue {
@@ -2221,10 +2264,46 @@ final class TagStore: ObservableObject {
 
     func requestSearchFocus() { searchFocusRequest &+= 1 }
 
+    /// Catalog and queue files that must not reach a plugin or the taste
+    /// profile, hidden or in the vault, even while revealed.
+    func pathsWithheldFromPlugins() -> Set<String> {
+        Set((allItems + queueItems + vaultItems).filter { !pluginMaySee($0) }.map(\.id))
+    }
+
+    /// The folders the Explore page draws from: the same roots as the corpus.
+    /// `explorePaths` is what keeps the queue out.
+    var exploreRoots: [String] {
+        ([scopeURL] + queueFolders).map { Self.canon($0.path).path }
+    }
+
+    /// The files batches may come from: the tagged library, so nothing still
+    /// waiting in the queue, narrowed by THE query. Hidden files never make the list.
+    var explorePaths: [String] {
+        let predicate = queryPredicate()
+        return visibleItems.filter { (predicate?($0) ?? true) && pluginMaySee($0) }.map(\.id)
+    }
+
+    /// Changes exactly when THE query does; empty when nothing is selected.
+    var exploreFilterSignature: String {
+        let diagrams = groups.filter { !$0.sets.isEmpty }.map { "\($0.op) \($0.mode) \($0.sets) \($0.regions.sorted())" }
+        let types = kindFilter.map { "\($0)" }.sorted() + extFilter.sorted()
+        return (diagrams + activeExcludes.map { "-\($0)" } + types).joined(separator: "|")
+    }
+
+    /// One Explore candidate pool from the plugin's index.
+    func runExploreQuery(_ query: ExploreQuery) async -> SearchEngine.ExploreOutcome {
+        let disabled = disabledPluginIDs, settings = pluginSettings
+        return await Task.detached(priority: .userInitiated) {
+            await SearchEngine.explore(query, disabledIDs: disabled, pluginSettings: settings)
+        }.value
+    }
+
     private func refreshSearchAvailability() {
         searchAvailable = !SearchEngine.searchPlugins(disabledIDs: disabledPluginIDs).isEmpty
         similarAvailable = !SearchEngine.searchPlugins(disabledIDs: disabledPluginIDs,
                                                        capability: "similar").isEmpty
+        exploreAvailable = !SearchEngine.searchPlugins(disabledIDs: disabledPluginIDs,
+                                                       capability: "explore").isEmpty
     }
 
     /// Every image under the scope (any depth) and the watched folders (queue
@@ -2337,8 +2416,8 @@ final class TagStore: ObservableObject {
         let images = shareableForSource(urls).allowed
             .filter { FileKind.of(contentType: nil, ext: $0.pathExtension) == .image }
         guard !images.isEmpty else { return }
-        if mode != .tags && mode != .explore {
-            setMode(.tags)
+        if mode != .tags && mode != .find {
+            showTagsTab()
         }
         searchQuery = nil
         similarTo = images
@@ -2588,6 +2667,7 @@ final class TagStore: ObservableObject {
         for m in moves where searchExtras.removeValue(forKey: m.from.path) != nil {
             searchExtras[m.to.path] = FileItem.load(m.to)
         }
+        exploreURLs = exploreURLs.map { map[$0.path] ?? $0 }
         searchHits = searchHits?.map { h in map[h.path].map { SearchHit(path: $0.path, score: h.score) } ?? h }
         var newSel = selection
         for m in moves where newSel.remove(m.from.path) != nil { newSel.insert(m.to.path) }
@@ -2700,11 +2780,34 @@ final class TagStore: ObservableObject {
 
     // MARK: - Queue
 
+    /// The tag list or the query diagrams (Find), whichever was used last.
+    /// Both edit one query.
+    func showTagsTab() {
+        setMode(tagsAsDiagram ? .find : .tags)
+    }
+
+    /// The Library tab as it was left: Tags, Query or Explore.
+    func showLibrary() {
+        if lastLibraryMode == .explore {
+            setMode(.explore)
+        } else {
+            showTagsTab()
+        }
+    }
+
+    func setTagsAsDiagram(_ diagram: Bool) {
+        tagsAsDiagram = diagram
+        setMode(diagram ? .find : .tags)
+    }
+
     func setMode(_ m: LibraryMode) {
         guard m != mode else { return }
         mode = m
+        if m == .tags || m == .find || m == .explore {
+            lastLibraryMode = m
+        }
         selection = []
-        // The query persists across Tags/Queue/Explore — same model everywhere.
+        // The query persists across Tags/Queue/Find — same model everywhere.
         // Search doesn't: the queue has its own bar and no search field.
         if m == .queue { clearSearch(refresh: false); scanQueue() } else { refreshResults() }
         if m == .remote { clearSuggestions() }
@@ -2719,6 +2822,30 @@ final class TagStore: ObservableObject {
         results = items
         let ids = Set(items.map(\.id))
         selection.formIntersection(ids)
+    }
+
+    /// Replace Explore's results, keeping whatever is still selected.
+    func showExplore(_ urls: [URL]) {
+        exploreURLs = urls
+        guard mode == .explore else {
+            return
+        }
+        results = resolvedExploreItems()
+        selection.formIntersection(results.map(\.id))
+    }
+
+    /// Explore's files as they are now: tags edited since the batch was drawn,
+    /// trashed files gone, anything hidden since left out.
+    private func resolvedExploreItems() -> [FileItem] {
+        let catalog = Dictionary(allItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let fm = FileManager.default
+        return exploreURLs.compactMap { url in
+            guard fm.fileExists(atPath: url.path) else {
+                return nil
+            }
+            let item = catalog[url.path] ?? FileItem.load(url)
+            return pluginMaySee(item) ? item : nil
+        }
     }
 
     func isRemote(_ url: URL) -> Bool {

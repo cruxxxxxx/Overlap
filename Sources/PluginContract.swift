@@ -20,6 +20,31 @@ struct SuggestRequest: Codable {
     var query: String? = nil          // search plugins only: free-text query; nil = index warm-up
     var similarTo: [String]? = nil    // `similar` plugins only: rank by likeness to these images
     var duplicates: DuplicatesQuery? = nil  // `duplicates` plugins only: near-identical pairs
+    var explore: ExploreQuery? = nil  // `explore` plugins only: candidates for the Explore page
+}
+
+/// One Explore draw. Vectors are base64 little-endian Float32 at the index's
+/// dimension, already normalized.
+struct ExploreQuery: Codable {
+    var tastes: [Data]        // the top `perTaste` matches for each of these
+    var avoid: [Data]         // matches near these are pushed down
+    var exclude: [String]     // never return these paths
+    var roots: [String]       // only files under these folders
+    var perTaste: Int
+    var random: Int           // this many uniform random picks as well
+    var within: [String]?     // only these paths
+}
+
+struct ExploreCandidateWire: Codable {
+    let path: String
+    let score: Double
+    let taste: Int?           // index into `tastes`; nil = a random pick
+    let vector: Data
+}
+
+struct ExploreResult: Codable {
+    let model: String         // which encoder made the vectors; others don't compare
+    let candidates: [ExploreCandidateWire]
 }
 
 /// Near-duplicate scan: pairs scoring at least `threshold` (plugin-defined,
@@ -116,6 +141,7 @@ struct SuggestResponse: Codable {
     var hits: [SearchHit]? = nil      // search plugins: ranked matches for `query`
     var indexedCount: Int? = nil      // search plugins: images in the persisted index
     var pairs: [DuplicatePair]? = nil // duplicates plugins: pairs at or above the threshold
+    var explore: ExploreResult? = nil // explore plugins: the candidate pool
 }
 
 /// One ranked search match. `score` is plugin-defined (CLIP cosine for
@@ -160,7 +186,7 @@ struct PluginManifest: Codable {
     var timeoutMs = 5000
     var settings: [PluginSetting]? = nil   // tunables the host renders + injects
     // Optional (not defaulted) so every existing manifest keeps decoding.
-    var capabilities: [String]? = nil      // "suggest" (default), "search", and/or "source"
+    var capabilities: [String]? = nil      // "suggest" (default), "search", "explore", and/or "source"
     var queryTimeoutMs: Int? = nil         // search plugins: per-query budget (index uses timeoutMs)
     var source: SourceInfo? = nil          // source plugins: how the host presents the provider
     var secrets: [PluginSecret]? = nil     // credentials the host keeps in the keychain

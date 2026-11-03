@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 /// Which left-column mode is active.
 /// `remote` shows items from a connected service: preview files in a cache
 /// that only become library files when tagged or saved.
-enum LibraryMode { case tags, queue, explore, remote }
+enum LibraryMode { case tags, queue, find, explore, remote }
 
 /// One section of the queue's "group by suggestions" view: a suggested tag and
 /// the (currently visible) files it covers. `suggestion == nil` is the trailing
@@ -91,6 +91,44 @@ enum TagPalette {
     /// the circles apart matters more than family grouping.
     static func setColor(for path: String) -> Color {
         colors[hash(path) % colors.count]
+    }
+}
+
+/// Where the preview of the selection sits.
+enum PreviewLayout: CaseIterable {
+    case off, side, top
+
+    var title: String {
+        switch self {
+        case .off:
+            return "No Preview"
+        case .side:
+            return "Preview Beside"
+        case .top:
+            return "Carousel"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .off:
+            return "rectangle"
+        case .side:
+            return "rectangle.righthalf.inset.filled"
+        case .top:
+            return "rectangle.tophalf.inset.filled"
+        }
+    }
+
+    var next: PreviewLayout {
+        switch self {
+        case .off:
+            return .side
+        case .side:
+            return .top
+        case .top:
+            return .off
+        }
     }
 }
 

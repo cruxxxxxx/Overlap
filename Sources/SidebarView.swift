@@ -9,6 +9,7 @@ extension TagNode {
 struct SidebarView: View {
     @EnvironmentObject var store: TagStore
     @State private var search = ""
+    @FocusState private var searchFocused: Bool
     @State private var renaming: TagNode?
     @State private var renameText = ""
     @State private var creating = false
@@ -16,25 +17,22 @@ struct SidebarView: View {
     @State private var mergingNode: TagNode?
     @State private var mergeFilter = ""
 
-    private var modeBinding: Binding<LibraryMode> {
-        Binding(get: { store.mode }, set: { store.setMode($0) })
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: modeBinding) {
-                Text("Tags").tag(LibraryMode.tags)
-                Text("Queue").tag(LibraryMode.queue)
-                Text("Explore").tag(LibraryMode.explore)
+            if store.mode == .tags || store.mode == .find || store.mode == .explore {
+                Picker("", selection: Binding(get: { store.mode == .find }, set: { store.setTagsAsDiagram($0) })) {
+                    Text("Tags").tag(false)
+                    Text("Query").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(8)
+                .help("Pick tags from the list, or build the query as Venn diagrams (⌘D)")
+                Divider()
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(8)
-            .tutorialAnchor(.modePicker)
-            Divider()
 
-            if store.mode == .explore {
-                ExploreView()
+            if store.mode == .find {
+                FindView()
             } else {
                 if store.mode == .queue {
                     queueControls
@@ -47,10 +45,18 @@ struct SidebarView: View {
                         Text("Select files, then click a tag to apply")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
-                    if (store.mode == .tags || store.mode == .remote) && search.isEmpty {
+                    if store.mode == .explore && search.isEmpty {
+                        TasteSections()
+                    }
+                    if store.mode != .queue && search.isEmpty {
                         SavedQueriesSection()
                         BoardsSection()
-                        Section("Tags") { tagRows }
+                        Section("Tags") {
+                            if store.mode == .explore {
+                                allTagsRow
+                            }
+                            tagRows
+                        }
                         ConnectedServicesSection()
                     } else {
                         tagRows
@@ -59,8 +65,23 @@ struct SidebarView: View {
                 .listStyle(.sidebar)
                 .tutorialAnchor(.sidebar)
             }
-            if store.mode == .tags || store.mode == .remote {
+            if store.mode == .tags || store.mode == .remote || store.mode == .explore {
                 ServicesMenuBar()
+            }
+            if store.mode == .explore {
+                TasteFooter()
+            }
+        }
+        // Explore's keys are bare letters: the filter field must let go of
+        // them once you're back looking at images.
+        .onChange(of: store.mode) { mode in
+            if mode == .explore {
+                searchFocused = false
+            }
+        }
+        .onChange(of: store.selection) { _ in
+            if store.mode == .explore {
+                searchFocused = false
             }
         }
         .sheet(item: $renaming) { node in renameSheet(node) }
@@ -81,6 +102,23 @@ struct SidebarView: View {
         .onReceive(NotificationCenter.default.publisher(for: .tvMergeTag)) { note in
             if let n = note.object as? TagNode { mergeFilter = ""; mergingNode = n }
         }
+    }
+
+    /// Explore from the whole library: clears every tag and type filter.
+    private var allTagsRow: some View {
+        let all = store.exploreFilterSignature.isEmpty
+        return Button { store.clearQueryEntirely() } label: {
+            HStack {
+                Label("All Tags", systemImage: "square.grid.2x2")
+                Spacer()
+                if all {
+                    Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Explore the whole library")
     }
 
     private var tagRows: some View {
@@ -224,6 +262,8 @@ struct SidebarView: View {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
             TextField("Filter tags", text: $search)
                 .textFieldStyle(.plain)
+                .focused($searchFocused)
+                .onExitCommand { searchFocused = false }
             if store.isIndexing { ProgressView().controlSize(.mini) }
             Button { newTagText = ""; creating = true } label: {
                 Image(systemName: "plus")
@@ -318,7 +358,7 @@ struct TagRow: View {
                 store.addTag(node.fullPath, to: store.selectedURLs())
             } else {
                 if store.mode == .remote {
-                    store.setMode(.tags)
+                    store.showTagsTab()
                 }
                 store.cycle(node.fullPath)
             }
@@ -326,7 +366,7 @@ struct TagRow: View {
             HStack(spacing: 6) {
                 Circle().fill(dotColor).frame(width: 8, height: 8)
                 Text(node.name)
-                    .strikethrough(store.mode == .tags && state == .exclude)
+                    .strikethrough((store.mode == .tags || store.mode == .explore) && state == .exclude)
                 Spacer()
                 TagColorDot(tag: node.fullPath)
                 Text("\(node.count)")
@@ -343,7 +383,7 @@ struct TagRow: View {
             return true
         }
         .contextMenu {
-            if store.mode == .tags {
+            if store.mode == .tags || store.mode == .explore {
                 Button("Include") { store.set(node.fullPath, to: .include) }
                 Button("Exclude") { store.set(node.fullPath, to: .exclude) }
                 Button("Off") { store.set(node.fullPath, to: .off) }

@@ -19,6 +19,7 @@ struct QueryBar: View {
         VStack(alignment: .leading, spacing: 0) {
             QuerySentence()
             HStack(spacing: 10) {
+                ExploreToggle()
                 matchMenu
                 SavedQueryMenu(canSave: !isEmptyQuery || store.searchQuery != nil)
                 TypeFilterMenu()

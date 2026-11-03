@@ -8,6 +8,7 @@ struct OverlapApp: App {
     @StateObject private var boards = BoardStore()
     @StateObject private var sources = SourceStore()
     @StateObject private var remote = RemoteBrowseModel()
+    @StateObject private var explore = ExploreModel()
 
     static var defaultScope: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -21,12 +22,14 @@ struct OverlapApp: App {
                 .environmentObject(boards)
                 .environmentObject(sources)
                 .environmentObject(remote)
+                .environmentObject(explore)
                 .frame(minWidth: 900, minHeight: 560)
                 .background(MainWindowReader())
                 .onAppear {
                     boards.attach(to: store)
                     sources.attach(to: store)
                     remote.attach(sources: sources, tags: store)
+                    explore.attach(to: store)
                 }
         }
         .commands {
@@ -43,6 +46,11 @@ struct OverlapApp: App {
                 BoardMenuItems()
                     .environmentObject(store)
                     .environmentObject(boards)
+            }
+            CommandGroup(before: .toolbar) {
+                LibraryTabMenuItems()
+                    .environmentObject(store)
+                Divider()
             }
             CommandGroup(replacing: .undoRedo) {
                 BoardUndoMenuItems()
@@ -108,6 +116,10 @@ struct OverlapApp: App {
                 .environmentObject(sources)
                 .frame(minWidth: 600, minHeight: 400)
                 .onAppear { boards.attach(to: store) }
+        }
+
+        Settings {
+            OverlapSettingsView()
         }
     }
 }
@@ -251,6 +263,9 @@ struct ContentView: View {
             ResultsGridView()
         }
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                LibraryTabPicker()
+            }
             ToolbarItem(placement: .navigation) {
                 Button {
                     chooseScope()
@@ -279,13 +294,7 @@ struct ContentView: View {
                                      : "Reveal or manage hidden tags")
                 .background(store.revealed ? Color.orange.opacity(0.25) : .clear)
 
-                Button { store.showPreview.toggle() } label: {
-                    Label("Preview", systemImage: store.showPreview
-                          ? "rectangle.righthalf.inset.filled"
-                          : "rectangle.righthalf.inset.filled")
-                }
-                .help("Toggle split preview pane")
-                .background(store.showPreview ? Color.accentColor.opacity(0.25) : .clear)
+                PreviewLayoutButton()
 
                 Button { store.performUndo() } label: {
                     Label("Undo", systemImage: "arrow.uturn.backward")
@@ -351,6 +360,119 @@ struct ContentView: View {
         if panel.runModal() == .OK, let url = panel.url {
             store.setScope(url)
         }
+    }
+}
+
+/// One preview button: click steps off → beside → on top (carousel); the
+/// menu picks one directly.
+struct PreviewLayoutButton: View {
+    @EnvironmentObject var store: TagStore
+
+    var body: some View {
+        let layout = store.previewLayout
+        Menu {
+            ForEach(PreviewLayout.allCases, id: \.self) { choice in
+                Button { store.previewLayout = choice } label: {
+                    HStack {
+                        Text(choice.title)
+                        if choice == layout { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            Label("Preview", systemImage: layout.symbol)
+        } primaryAction: {
+            store.previewLayout = layout.next
+        }
+        .help("\(layout.title). Click for \(layout.next.title.lowercased()); hold for the menu.")
+        .background(layout == .off ? Color.clear : Color.accentColor.opacity(0.25))
+    }
+}
+
+/// The main window's two places. Tags and Query are the Library's sidebar
+/// switch; Explore is a button on its results bar.
+enum LibraryTab: Hashable {
+    case library, queue
+
+    static func of(_ mode: LibraryMode) -> LibraryTab? {
+        switch mode {
+        case .tags, .find, .explore:
+            return .library
+        case .queue:
+            return .queue
+        case .remote:
+            return nil
+        }
+    }
+}
+
+extension TagStore {
+    func show(_ tab: LibraryTab) {
+        switch tab {
+        case .library:
+            showLibrary()
+        case .queue:
+            setMode(.queue)
+        }
+    }
+}
+
+/// Library / Queue in the middle of the toolbar: words by default, icons when
+/// Settings turns the labels off.
+struct LibraryTabPicker: View {
+    @EnvironmentObject var store: TagStore
+    @AppStorage(LibraryTabPicker.labelsKey) private var showLabels = true
+
+    static let labelsKey = "toolbarTabLabels"
+
+    var body: some View {
+        Picker("View", selection: Binding(get: { LibraryTab.of(store.mode) },
+                                          set: { if let tab = $0 { store.show(tab) } })) {
+            tab(.library, "Library", "photo.on.rectangle")
+            tab(.queue, queueTitle, "tray")
+        }
+        .pickerStyle(.segmented)
+        .help("Library (⌘1), Queue (⌘2)")
+        .tutorialAnchor(.modePicker)
+    }
+
+    private var queueTitle: String {
+        store.queueItems.isEmpty ? "Queue" : "Queue · \(store.queueItems.count)"
+    }
+
+    @ViewBuilder
+    private func tab(_ tab: LibraryTab, _ title: String, _ symbol: String) -> some View {
+        if showLabels {
+            Text(title).tag(LibraryTab?.some(tab))
+        } else {
+            Image(systemName: symbol)
+                .accessibilityLabel(title)
+                .tag(LibraryTab?.some(tab))
+        }
+    }
+}
+
+/// View menu: switch tabs from the keyboard.
+struct LibraryTabMenuItems: View {
+    @EnvironmentObject var store: TagStore
+
+    var body: some View {
+        Button("Library") { store.show(.library) }
+            .keyboardShortcut("1", modifiers: .command)
+        Button("Queue") { store.show(.queue) }
+            .keyboardShortcut("2", modifiers: .command)
+        Button(store.mode == .explore ? "Stop Exploring" : "Explore") {
+            if store.mode == .explore {
+                store.showTagsTab()
+            } else {
+                store.setMode(.explore)
+            }
+        }
+        .keyboardShortcut("3", modifiers: .command)
+        Button(store.mode == .find ? "Show Tags" : "Show Query") {
+            store.setTagsAsDiagram(store.mode != .find)
+        }
+        .keyboardShortcut("d", modifiers: .command)
     }
 }
 

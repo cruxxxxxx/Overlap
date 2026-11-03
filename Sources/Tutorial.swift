@@ -83,7 +83,7 @@ final class TutorialModel: ObservableObject {
         TutorialStep(
             target: .modePicker, kind: .action,
             title: "1 · The Queue",
-            body: "Click “Queue” at the top of the sidebar. Freshly downloaded, untagged images collect here.",
+            body: "Click “Queue” in the middle of the toolbar (or press ⌘2). Freshly downloaded, untagged images collect here.",
             isDone: { $0.mode == .queue }),
         TutorialStep(
             target: .watchedFolders, kind: .info,
@@ -107,12 +107,12 @@ final class TutorialModel: ObservableObject {
         TutorialStep(
             target: .sidebar, kind: .action,
             title: "6 · Query by tag",
-            body: "Switch to “Tags”, then click a tag to filter by it. Click again to exclude it instead.",
+            body: "Switch to “Library” (⌘1), then click a tag to filter by it. Click again to exclude it instead.",
             isDone: { !$0.querySets.isEmpty }),
         TutorialStep(
-            target: .modePicker, kind: .info,
-            title: "7 · Explore overlaps",
-            body: "“Explore” shows tags as Venn diagrams — click the overlaps to find images that share tags."),
+            target: .sidebar, kind: .info,
+            title: "7 · Find overlaps",
+            body: "“Query” at the top of the sidebar (⌘D) shows the same query as Venn diagrams — click the overlaps to find images that share tags."),
         TutorialStep(
             target: .center, kind: .info,
             title: "You're set!",

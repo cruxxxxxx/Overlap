@@ -462,7 +462,7 @@ extension BoardStore {
             paths = Array(paths.prefix(limit))
         }
         let description = store.queryDescription
-        let query = source ?? (store.mode == .queue
+        let query = source ?? (store.mode == .queue || store.mode == .explore
             ? nil
             : store.currentQuerySnapshot(name: description, includeTypes: true))
         let isPrivate = query.map { store.isPrivateQuery($0) } ?? false

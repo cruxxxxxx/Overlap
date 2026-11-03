@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// The Explore sidebar: one or more Venn diagrams (joined by AND or OR) on top,
+/// The Find sidebar: one or more Venn diagrams (joined by AND or OR) on top,
 /// the circle-pack tag map below. Tap a leaf in the map to add it to the
 /// active diagram; click a diagram to activate it; paint regions to shape
 /// each diagram's logic. All of it edits the one query the QueryBar shows.
-struct ExploreView: View {
+struct FindView: View {
     @EnvironmentObject var store: TagStore
     @EnvironmentObject var boards: BoardStore
     @Environment(\.openWindow) private var openWindow

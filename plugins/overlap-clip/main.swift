@@ -19,6 +19,7 @@ import Accelerate
 //   warm-up:  library = [every image], query = nil  → embed what's new, no hits
 //   query:    library = [],            query = text → rank the index, return hits
 //   similar:  similarTo = [paths]                    → rank the index by likeness to them
+//   explore:  explore = {tastes, avoid, exclude, …}  → candidates with their vectors
 //   duplicates: duplicates = {threshold, paths?}     → pairs of near-identical images
 
 // MARK: - Wire contract (hand-copied from Sources/PluginContract.swift)
@@ -61,12 +62,32 @@ struct SuggestRequest: Codable {
     let query: String?
     let similarTo: [String]?
     let duplicates: DuplicatesQuery?
+    let explore: ExploreQuery?
 }
 /// Near-duplicate scan: every pair of indexed images (restricted to `paths`
 /// when given) at or above `threshold` cosine.
 struct DuplicatesQuery: Codable {
     let threshold: Double
     let paths: [String]?
+}
+struct ExploreQuery: Codable {
+    let tastes: [Data]
+    let avoid: [Data]
+    let exclude: [String]
+    let roots: [String]
+    let perTaste: Int
+    let random: Int
+    let within: [String]?
+}
+struct ExploreCandidate: Codable {
+    let path: String
+    let score: Double
+    let taste: Int?
+    let vector: Data
+}
+struct ExploreResult: Codable {
+    let model: String
+    let candidates: [ExploreCandidate]
 }
 struct DuplicatePair: Codable { let a: String; let b: String; let score: Double }
 struct RawSuggestion: Codable {
@@ -80,6 +101,7 @@ struct SuggestResponse: Codable {
     let hits: [SearchHit]
     let indexedCount: Int
     var pairs: [DuplicatePair]? = nil
+    var explore: ExploreResult? = nil
 }
 
 // MARK: - Config
@@ -663,6 +685,70 @@ func duplicatePairs(_ q: DuplicatesQuery) -> [DuplicatePair] {
     return pairs.sorted { $0.score > $1.score }
 }
 
+// MARK: - Explore
+
+/// Above this likeness to something the user asked for less of, a match is
+/// marked down. Random pairs of real images rarely score this high (p99 ≈ 0.58).
+let avoidFloor: Float = 0.55
+
+/// The candidate pool for one Explore batch: the best matches per taste, plus
+/// uniform random picks, each with its vector so the host can update its
+/// profile without another call. Read-only, and needs no model.
+func exploreCandidates(_ q: ExploreQuery) -> ExploreResult {
+    let empty = ExploreResult(model: meta.model, candidates: [])
+    guard meta.dim > 0, meta.rows > 0, let fh = try? FileHandle(forReadingFrom: binURL) else { return empty }
+    defer { try? fh.close() }
+    let size = Int(lseek(fh.fileDescriptor, 0, SEEK_END))
+    guard size > 0, let raw = mmap(nil, size, PROT_READ, MAP_PRIVATE, fh.fileDescriptor, 0),
+          raw != MAP_FAILED else { return empty }
+    defer { munmap(raw, size) }
+    let stored = UnsafePointer(raw.assumingMemoryBound(to: Float.self))
+    let dim = meta.dim
+
+    let excluded = Set(q.exclude)
+    let prefixes = q.roots.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+    let within = q.within.map { Set($0) }
+    let eligible = meta.images.filter { path, rec in
+        rec.row >= 0 && (rec.row + 1) * dim * 4 <= size && !excluded.contains(path)
+            && (within?.contains(path) ?? true)
+            && prefixes.contains { path.hasPrefix($0) }
+    }.map { (path: $0.key, row: $0.value.row) }
+
+    func floats(_ data: Data) -> [Float]? {
+        guard data.count == dim * 4 else { return nil }
+        return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    }
+    func dot(_ v: [Float], _ row: Int) -> Float {
+        var d: Float = 0
+        vDSP_dotpr(v, 1, stored.advanced(by: row * dim), 1, &d, vDSP_Length(dim))
+        return d
+    }
+    func wire(_ entry: (path: String, row: Int), score: Double, taste: Int?) -> ExploreCandidate {
+        let vector = Data(bytes: stored.advanced(by: entry.row * dim), count: dim * 4)
+        return ExploreCandidate(path: entry.path, score: score, taste: taste, vector: vector)
+    }
+
+    let avoid = q.avoid.compactMap(floats)
+    let penalties = eligible.map { entry -> Float in
+        let nearest = avoid.map { dot($0, entry.row) }.max() ?? 0
+        return max(0, nearest - avoidFloor)
+    }
+
+    var out: [ExploreCandidate] = []
+    for (t, data) in q.tastes.enumerated() {
+        guard let taste = floats(data) else { continue }
+        let scored = eligible.indices.map { (index: $0, score: dot(taste, eligible[$0].row) - penalties[$0]) }
+            .sorted { $0.score > $1.score }
+        for pick in scored.prefix(max(0, q.perTaste)) {
+            out.append(wire(eligible[pick.index], score: Double(pick.score), taste: t))
+        }
+    }
+    for entry in eligible.shuffled().prefix(max(0, q.random)) {
+        out.append(wire(entry, score: 0, taste: nil))
+    }
+    return ExploreResult(model: meta.model, candidates: out)
+}
+
 // MARK: - Main
 
 let input = FileHandle.standardInput.readDataToEndOfFile()
@@ -678,6 +764,7 @@ let query = req.query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 let similarTo = req.similarTo ?? []
 var hits: [SearchHit] = []
 var pairs: [DuplicatePair]?
+let exploreResult = req.explore.map(exploreCandidates)
 if let dup = req.duplicates {
     pairs = duplicatePairs(dup)   // read-only, like search: no lock (a warm-up may hold it for minutes)
 }
@@ -713,7 +800,7 @@ if !library.isEmpty || !query.isEmpty || !similarTo.isEmpty {
 }
 
 let resp = SuggestResponse(protocolVersion: 1, suggestions: [], hits: hits, indexedCount: liveCount,
-                           pairs: pairs)
+                           pairs: pairs, explore: exploreResult)
 let encoder = JSONEncoder()
 FileHandle.standardOutput.write((try? encoder.encode(resp))
     ?? Data("{\"protocolVersion\":1,\"suggestions\":[],\"hits\":[],\"indexedCount\":0}".utf8))

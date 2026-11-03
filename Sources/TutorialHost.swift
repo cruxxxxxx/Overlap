@@ -50,10 +50,12 @@ struct TutorialHost<Content: View>: View {
     private func resolvedRect(_ target: TutorialTarget,
                               _ anchors: [TutorialTarget: Anchor<CGRect>],
                               _ proxy: GeometryProxy) -> CGRect? {
-        if target == .center { return nil }
+        // The tab picker lives in the toolbar, outside this overlay: center the
+        // callout and leave the toolbar clickable.
+        if target == .center || target == .modePicker { return nil }
         if let a = anchors[target] { return proxy[a] }
         switch target {
-        case .modePicker, .watchedFolders, .applyButton, .sidebar:
+        case .watchedFolders, .applyButton, .sidebar:
             let gridMinX = anchors[.grid].map { proxy[$0].minX }
             let width = gridMinX ?? max(240, proxy.size.width * 0.22)
             return CGRect(x: 0, y: 0, width: width, height: proxy.size.height)

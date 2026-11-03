@@ -74,7 +74,7 @@ never blocks the others or the app.
 | `wantsKnownTags` | include the user's full tag vocabulary in the request |
 | `wantsLibrary` | include the whole tagged-library corpus (for similarity/clustering) |
 | `timeoutMs` | kill the process after this long |
-| `capabilities` | optional; `["suggest"]` (default) and/or `["search"]`, `["similar"]`, `["duplicates"]` — see [Search plugins](#search-plugins-capabilities-search) |
+| `capabilities` | optional; `["suggest"]` (default) and/or `["search"]`, `["similar"]`, `["duplicates"]`, `["explore"]` — see [Search plugins](#search-plugins-capabilities-search) |
 | `queryTimeoutMs` | optional, search plugins only: budget for one query (indexing uses `timeoutMs`) |
 
 ---
@@ -216,8 +216,30 @@ Two more shapes over the same index, each behind its own capability:
   Loose slider sends 0.98 … 0.90.
 - Neither is ever sent hidden-tag or vault files.
 
+### Explore (`"explore"`)
+
+The Explore page draws each batch from your index. Overlap keeps the taste
+profile itself and sends only vectors:
+
+```json
+"explore": { "tastes": ["<base64>"], "avoid": ["<base64>"], "exclude": ["/path"],
+             "roots": ["/folder"], "perTaste": 40, "random": 72 }
+```
+
+Answer with `explore: { "model": "<encoder id>", "candidates": [{ "path", "score",
+"taste", "vector" }] }` and `indexedCount`. Vectors are base64 little-endian
+Float32, normalized, as you stored them.
+
+- For each taste, return its best `perTaste` matches (`taste` = its index),
+  marking down anything close to an `avoid` vector. Add `random` uniform picks
+  with `taste` null. Stay under `roots`; skip `exclude`.
+- Return `model` honestly: a new value makes Overlap discard the profile, since
+  vectors from another encoder don't compare.
+- It runs on every batch, so don't load a model for it. Hidden-tag and vault
+  files are never named in the request; any you return are dropped.
+
 `plugins/overlap-clip/` is the reference: MobileCLIP-S2 (Core ML) image + text
-encoders, downloaded on first use. It has all three capabilities.
+encoders, downloaded on first use. It has all four capabilities.
 
 ---
 

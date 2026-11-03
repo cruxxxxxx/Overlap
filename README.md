@@ -22,10 +22,10 @@ Overlap reads and writes real macOS tags (`com.apple.metadata:_kMDItemUserTags`)
 
 ## Screenshots
 
-| Explore — Venn query | Tags — grid + preview |
+| Query — Venn diagrams | Tags — grid + preview |
 |---|---|
-| ![Explore](docs/screenshots/explore-venn.png) | ![Grid](docs/screenshots/grid-preview.png) |
-| **Queue — intake & drill** | **Explore — tag map** |
+| ![Diagram](docs/screenshots/explore-venn.png) | ![Grid](docs/screenshots/grid-preview.png) |
+| **Queue — intake & drill** | **Query — tag map** |
 | ![Queue](docs/screenshots/queue.png) | ![Tag map](docs/screenshots/tag-map.png) |
 
 ## Features
@@ -69,7 +69,7 @@ Overlap runs unsandboxed so it can read and write Finder tags across your folder
 ## Usage
 
 1. Point it at a folder (toolbar folder button, default `~/Pictures`). Spotlight must have indexed the scope for tags to appear.
-2. Filter by clicking sidebar tags (cycle include → exclude → off), or paint Venn regions in **Explore**. Narrow by file **Type** as needed.
+2. Filter by clicking sidebar tags (cycle include → exclude → off), or paint Venn regions under **Query** at the top of the sidebar (⌘D). Or wander: the **Explore** button on the results bar (⌘3) shows batches of images, random at first, then steered by what you like and look at. The profile stays on your Mac. Narrow by file **Type** as needed.
 3. Select files, press **T**, type a tag, ⏎ — tags are written to the files, so Finder and Spotlight see them immediately.
 4. **Queue**: add watched folders, set the subfolder depth, tag the untagged items, then **Apply** to move them into your library.
 5. **Search**: ⌘F, describe what you're looking for, ⏎. The first run downloads the models and indexes your images in the background (progress shows above the grid); later launches only index what changed. Escape clears the search.

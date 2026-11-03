@@ -5,6 +5,8 @@ import SwiftUI
 /// or the QuickLook catch-all), chosen per selection.
 struct PreviewPane: View {
     let item: FileItem?
+    /// One line of info under the image, for when height is what's scarce.
+    var compact = false
     @State private var typeRows: [(String, String)] = []
     @State private var media: OriginRecord?
 
@@ -23,7 +25,11 @@ struct PreviewPane: View {
                             .id(item.id)   // recreate so the preview follows selection
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    infoPanel(item)
+                    if compact {
+                        compactInfo(item)
+                    } else {
+                        infoPanel(item)
+                    }
                 }
                 .padding(10)
                 .task(id: item.id) {
@@ -40,6 +46,18 @@ struct PreviewPane: View {
             }
         }
         .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    private func compactInfo(_ item: FileItem) -> some View {
+        var parts = [item.ext.isEmpty ? item.kind.label : item.ext.uppercased()]
+        if let bytes = item.size {
+            parts.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+        }
+        if let date = item.modDate {
+            parts.append("Modified \(date.formatted(date: .abbreviated, time: .shortened))")
+        }
+        return Text(parts.joined(separator: " · "))
+            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
     }
 
     private func infoPanel(_ item: FileItem) -> some View {
