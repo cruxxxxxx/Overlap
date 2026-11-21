@@ -80,14 +80,18 @@ final class TagStore: ObservableObject {
     private var exploreURLs: [URL] = []
     /// Runs before the vault reconciles: the taste profile drops hidden files.
     var onPrivacyChange: (() -> Void)?
-    @Published private(set) var searching = false
+    @Published private(set) var searching = false {
+        didSet { resumeSearchWarmUpWhenIdle() }
+    }
     @Published private(set) var searchStatus: SearchStatus = .ok
     /// A search plugin is installed + enabled (cached; discovery hits disk).
     @Published private(set) var searchAvailable = false
     /// The search plugin is (re)building its index. Its own flag, not
     /// `warmingUp`: CLIP indexing can run for minutes and must not freeze
     /// suggestions; the two plugins keep separate caches.
-    @Published private(set) var searchIndexing = false
+    @Published private(set) var searchIndexing = false {
+        didSet { resumeSearchWarmUpWhenIdle() }
+    }
     @Published private(set) var searchProgress: String?
     @Published var searchFocusRequest = 0   // bump to focus the search field
     /// Last search's hits, score-descending. nil = inactive.
@@ -196,6 +200,52 @@ final class TagStore: ObservableObject {
     @Published var purgeAllThumbnailsOnLock = UserDefaults.standard.bool(forKey: "purgeAllThumbnailsOnLock") {
         didSet { UserDefaults.standard.set(purgeAllThumbnailsOnLock, forKey: "purgeAllThumbnailsOnLock") }
     }
+    /// Let the local ML plugins learn hidden files too, in their own index
+    /// inside the vault (see `vaultPartition`). Source plugins never see them.
+    @Published private(set) var pluginsInVault = UserDefaults.standard.bool(forKey: "pluginsInVault")
+    /// Explore draws from, and learns a taste for, the hidden files only.
+    /// Explore hears of a switch after the value changed (a Combine sink would
+    /// fire before, while `explorePaths` still answered for the old context).
+    @Published private(set) var exploreInVault = false {
+        didSet {
+            if oldValue != exploreInVault {
+                onExploreContextChange?(exploreInVault)
+            }
+        }
+    }
+    var onExploreContextChange: ((Bool) -> Void)?
+    /// Reclaim Space is copying the vault; writes into it would be lost.
+    @Published private(set) var vaultRebuilding = false
+    /// The vault partition's indexes are syncing ("Indexing hidden… 3/40").
+    @Published private(set) var vaultIndexProgress: String?
+    @Published private(set) var vaultWarmingUp = false
+    /// The suggest half of a vault warm-up; selection suggestions wait for it.
+    private var vaultSuggestWarming = false
+    /// Bumped by every lock and every switch of `pluginsInVault`: vault work
+    /// started under an older value lands nowhere.
+    private var vaultGeneration = 0
+    /// Bumped whenever plugin circles are re-asked, so a run from before can't land.
+    private var setHitsGeneration = 0
+    private var lastVaultWarmedSig = ""
+    /// A library warm-up was asked for while one ran; see `warmUpPlugins`.
+    private var warmUpAgain = false
+    /// A search-index warm-up was asked for during a search or index run;
+    /// it runs once both are idle.
+    private var searchWarmUpPending = false
+    private var searchWarmUpForced = false
+
+    private func resumeSearchWarmUpWhenIdle() {
+        guard searchWarmUpPending, !searching, !searchIndexing else { return }
+        // After the completion handler that cleared the flag has finished.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.searchWarmUpPending, !self.searching, !self.searchIndexing else { return }
+            let force = self.searchWarmUpForced
+            self.searchWarmUpPending = false
+            self.searchWarmUpForced = false
+            self.warmUpSearchIndex(force: force)
+        }
+    }
+    private var lastVaultSentCorpusSig = ""
     /// The attached vault's files; also merged into `allItems` while revealed.
     private var vaultItems: [FileItem] = []
     private var vaultBusy = false
@@ -206,7 +256,7 @@ final class TagStore: ObservableObject {
     private var autoLock: AutoLock?
     /// Bumped by every lock, so a reveal still attaching when the Mac sleeps
     /// can't complete afterwards.
-    private var lockEpoch = 0
+    private(set) var lockEpoch = 0
 
     // Results
     @Published var results: [FileItem] = []
@@ -275,6 +325,7 @@ final class TagStore: ObservableObject {
     @Published private(set) var canRedo = false
     private var undoStack: [UndoStep] = []
     private var redoStack: [UndoStep] = []
+    private var recordingPaused = false
 
     private var allItems: [FileItem] = []
     /// allItems minus hidden-tagged files while locked; the pool every surface
@@ -589,7 +640,10 @@ final class TagStore: ObservableObject {
 
     /// A tag is hidden if it's marked hidden or lives beneath one that is.
     func isHiddenTag(_ tag: String) -> Bool {
-        hiddenTags.contains(tag) || hiddenTags.contains { tag.hasPrefix($0 + "/") }
+        if tag.hasPrefix("@similar:") {
+            return QuerySet(tag).similarPaths.contains(where: VaultDisk.contains)
+        }
+        return hiddenTags.contains(tag) || hiddenTags.contains { tag.hasPrefix($0 + "/") }
     }
 
     private func itemHidden(_ item: FileItem) -> Bool {
@@ -681,10 +735,10 @@ final class TagStore: ObservableObject {
     /// of the current matching images also carry that tag. Linear in the subset.
     func coOccurring() -> [(tag: String, count: Int)] {
         let active = Set(activeIncludes)
-        // An empty OR diagram starts a fresh clause — its candidates come from
-        // the whole catalog, not the other diagrams' intersection.
-        let freshClause = activeGroup.sets.isEmpty && activeGroup.op == .or
-        let base = (active.isEmpty || freshClause) ? visibleItems : results
+        // An empty diagram offers the whole catalog, not the other diagrams'
+        // intersection: under AND a pick may match nothing, and the badge flips
+        // it to OR.
+        let base = (active.isEmpty || activeGroup.sets.isEmpty) ? visibleItems : results
         var counts: [String: Int] = [:]
         for item in base {
             for t in item.tags where !active.contains(t) { counts[t, default: 0] += 1 }
@@ -741,17 +795,21 @@ final class TagStore: ObservableObject {
     // MARK: Group management
 
     func addGroup() {
-        let g = VennGroup()
-        groups.append(g)
-        activeGroupID = g.id
-        refreshResults()
+        editQuery("Add Diagram") {
+            let g = VennGroup()
+            groups.append(g)
+            activeGroupID = g.id
+            refreshResults()
+        }
     }
 
     func removeGroup(_ id: UUID) {
-        guard groups.count > 1, let i = groups.firstIndex(where: { $0.id == id }) else { return }
-        groups.remove(at: i)
-        if activeGroupID == id { activeGroupID = groups[min(i, groups.count - 1)].id }
-        refreshResults()
+        editQuery("Remove Diagram") {
+            guard groups.count > 1, let i = groups.firstIndex(where: { $0.id == id }) else { return }
+            groups.remove(at: i)
+            if activeGroupID == id { activeGroupID = groups[min(i, groups.count - 1)].id }
+            refreshResults()
+        }
     }
 
     func activateGroup(_ id: UUID) {
@@ -760,30 +818,38 @@ final class TagStore: ObservableObject {
     }
 
     func setGroupMode(_ id: UUID, _ m: MatchMode) {
-        guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
-        groups[i].mode = m
-        groups[i].regions = []   // choosing a preset clears painted regions
-        refreshResults()
+        editQuery("Diagram Mode") {
+            guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
+            groups[i].mode = m
+            groups[i].regions = []   // choosing a preset clears painted regions
+            refreshResults()
+        }
     }
 
     func toggleGroupOp(_ id: UUID) {
-        guard let i = groups.firstIndex(where: { $0.id == id }), i > 0 else { return }
-        groups[i].op = groups[i].op == .and ? .or : .and
-        refreshResults()
+        editQuery("AND / OR") {
+            guard let i = groups.firstIndex(where: { $0.id == id }), i > 0 else { return }
+            groups[i].op = groups[i].op == .and ? .or : .and
+            refreshResults()
+        }
     }
 
     /// Toggle a painted region on one diagram.
     func toggleRegion(group id: UUID, mask: Int) {
-        guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
-        if groups[i].regions.contains(mask) { groups[i].regions.remove(mask) }
-        else { groups[i].regions.insert(mask) }
-        refreshResults()
+        editQuery("Paint Region") {
+            guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
+            if groups[i].regions.contains(mask) { groups[i].regions.remove(mask) }
+            else { groups[i].regions.insert(mask) }
+            refreshResults()
+        }
     }
 
     func clearRegions(group id: UUID) {
-        guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
-        groups[i].regions = []
-        refreshResults()
+        editQuery("Clear Regions") {
+            guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
+            groups[i].regions = []
+            refreshResults()
+        }
     }
 
     /// Drop painted masks that no item actually carries. The include/exclude
@@ -802,49 +868,55 @@ final class TagStore: ObservableObject {
     /// Add a tag as a new circle on the ACTIVE diagram (no-op if it's already
     /// on any diagram — unless region-excluded there, which re-includes it).
     func include(_ tag: String) {
-        queryExcludes.remove(tag)
-        if let gi = owningGroupIndex(of: tag) {
-            // re-including a region-excluded set lifts the constraint
-            if regionRole(tag) == .excluded, let i = groups[gi].sets.firstIndex(of: tag) {
-                let bit = 1 << i
-                groups[gi].regions = Set(groups[gi].regions.flatMap { [$0, $0 | bit] })
-                pruneEmptyRegions(gi)
+        editQuery("Add “\(QuerySet.displayName(tag))”") {
+            queryExcludes.remove(tag)
+            if let gi = owningGroupIndex(of: tag) {
+                // re-including a region-excluded set lifts the constraint
+                if regionRole(tag) == .excluded, let i = groups[gi].sets.firstIndex(of: tag) {
+                    let bit = 1 << i
+                    groups[gi].regions = Set(groups[gi].regions.flatMap { [$0, $0 | bit] })
+                    pruneEmptyRegions(gi)
+                }
+                refreshResults()
+            } else {
+                mutateSets(in: activeGroupIndex) { $0.append(tag) }
             }
-            refreshResults()
-        } else {
-            mutateSets(in: activeGroupIndex) { $0.append(tag) }
         }
     }
 
     /// Exclude a tag. If it's a circle with painted regions, constrain that
     /// diagram's regions (circle stays); otherwise move it to the excludes.
     func exclude(_ tag: String) {
-        if let gi = owningGroupIndex(of: tag), !groups[gi].regions.isEmpty,
-           let i = groups[gi].sets.firstIndex(of: tag) {
-            let bit = 1 << i
-            let constrained = Set(groups[gi].regions.map { $0 & ~bit }).filter { $0 != 0 }
-            if !constrained.isEmpty {
-                groups[gi].regions = constrained
-                pruneEmptyRegions(gi)
-                refreshResults()
-                return
+        editQuery("Exclude “\(QuerySet.displayName(tag))”") {
+            if let gi = owningGroupIndex(of: tag), !groups[gi].regions.isEmpty,
+               let i = groups[gi].sets.firstIndex(of: tag) {
+                let bit = 1 << i
+                let constrained = Set(groups[gi].regions.map { $0 & ~bit }).filter { $0 != 0 }
+                if !constrained.isEmpty {
+                    groups[gi].regions = constrained
+                    pruneEmptyRegions(gi)
+                    refreshResults()
+                    return
+                }
             }
-        }
-        queryExcludes.insert(tag)
-        if let gi = owningGroupIndex(of: tag) {
-            mutateSets(in: gi) { $0.removeAll { $0 == tag } }
-        } else {
-            refreshResults()
+            queryExcludes.insert(tag)
+            if let gi = owningGroupIndex(of: tag) {
+                mutateSets(in: gi) { $0.removeAll { $0 == tag } }
+            } else {
+                refreshResults()
+            }
         }
     }
 
     /// Drop a tag from the query entirely.
     func clear(_ tag: String) {
-        queryExcludes.remove(tag)
-        if let gi = owningGroupIndex(of: tag) {
-            mutateSets(in: gi) { $0.removeAll { $0 == tag } }
-        } else {
-            refreshResults()
+        editQuery("Remove “\(QuerySet.displayName(tag))”") {
+            queryExcludes.remove(tag)
+            if let gi = owningGroupIndex(of: tag) {
+                mutateSets(in: gi) { $0.removeAll { $0 == tag } }
+            } else {
+                refreshResults()
+            }
         }
     }
 
@@ -860,13 +932,15 @@ final class TagStore: ObservableObject {
     func cycle(_ tag: String) { set(tag, to: effectiveState(for: tag).next) }
 
     func clearQuery() {
-        clearSearch(refresh: false)
-        let g = VennGroup()
-        groups = [g]
-        activeGroupID = g.id
-        queryExcludes = []
-        applyQueryDefaults()
-        refreshResults()
+        editQuery("Clear Query") {
+            clearSearch(refresh: false)
+            let g = VennGroup()
+            groups = [g]
+            activeGroupID = g.id
+            queryExcludes = []
+            applyQueryDefaults()
+            refreshResults()
+        }
     }
 
     /// Explore's All Tags: the whole library, so tag defaults and the type
@@ -1241,12 +1315,29 @@ final class TagStore: ObservableObject {
         revealed = true
         applyVisibility()
         reconcileVault()   // pull out anything unhidden while it was locked
+        if pluginsInVault {
+            warmUpVaultPlugins()
+            rerunPluginQueries()   // hidden hits join in
+        }
     }
 
     func lock() {
         lockEpoch += 1
         guard revealed else { return }
         revealed = false
+        exploreInVault = false
+        endVaultWork()
+        // Even while a vault job keeps the image attached: no plugin keeps
+        // reading hidden files past the lock, nor starts on an older partition.
+        let doomed = VaultRuns.close()
+        Task.detached(priority: .userInitiated) {
+            VaultRuns.kill(doomed)
+        }
+        clearSuggestions()   // chips may name hidden tags
+        // Undo steps name tags and capture vault paths.
+        undoStack.removeAll()
+        redoStack.removeAll()
+        updateUndoFlags()
         dropVaultItems()
         let purgeAll = purgeAllThumbnailsOnLock
         if purgeAll {
@@ -1255,6 +1346,9 @@ final class TagStore: ObservableObject {
             ThumbnailCache.shared.removeVaultThumbnails()
         }
         applyVisibility()
+        if pluginsInVault {
+            rerunPluginQueries()   // hidden hits leave
+        }
         detachVaultIfIdle()
         if vaultEnabled {
             // The preview pane and Quick Look panel render through QuickLook.
@@ -1289,9 +1383,14 @@ final class TagStore: ObservableObject {
         vaultBusy = true
         vaultStatus = "Unlocking vault…"
         Task.detached(priority: .userInitiated) { [weak self] in
-            let result = Result { () throws -> [FileItem] in
-                try VaultDisk.attach(key: key)
-                return VaultDisk.scanFiles().map { FileItem.load($0) }
+            let result: Result<[FileItem], Error>
+            do {
+                result = .success(try await VaultDisk.inOrder { () throws -> [FileItem] in
+                    try VaultDisk.attach(key: key)
+                    return VaultDisk.scanFiles().map { FileItem.load($0) }
+                })
+            } catch {
+                result = .failure(error)
             }
             await MainActor.run {
                 guard let self else { return }
@@ -1325,7 +1424,7 @@ final class TagStore: ObservableObject {
 
     private func detachVaultIfIdle() {
         guard !vaultBusy else { return }   // the running job detaches when it ends
-        Task.detached(priority: .userInitiated) {
+        VaultDisk.serially {
             VaultDisk.detach()
         }
     }
@@ -1419,6 +1518,8 @@ final class TagStore: ObservableObject {
         let movedIn = Set(outcome.movedIn.map(\.from.path))
         let movedOut = Set(outcome.movedOut.map(\.from.path))
         let gone = movedIn.union(movedOut)
+        remapSeeds(Dictionary((outcome.movedIn + outcome.movedOut).map { ($0.from.path, $0.to.path) },
+                              uniquingKeysWith: { first, _ in first }))
         allItems.removeAll { gone.contains($0.id) }
         queueItems.removeAll { movedIn.contains($0.id) }
         vaultItems.removeAll { movedOut.contains($0.id) }
@@ -1456,6 +1557,8 @@ final class TagStore: ObservableObject {
         }
         if !revealed {
             detachVaultIfIdle()
+        } else if !gone.isEmpty {
+            warmUpVaultPlugins()
         }
         if vaultNeedsReconcile {
             vaultNeedsReconcile = false
@@ -1476,18 +1579,24 @@ final class TagStore: ObservableObject {
             return
         }
         vaultBusy = true
+        vaultRebuilding = true
         vaultStatus = "Reclaiming space…"
+        endVaultWork()   // the rebuild kills vault runs; whatever they did is redone after
         Task.detached(priority: .userInitiated) { [weak self] in
             let result = Result { try VaultDisk.rebuild(key: key) }
             await MainActor.run {
                 guard let self else { return }
                 self.vaultBusy = false
+                self.vaultRebuilding = false
                 self.vaultStatus = nil
                 if case .failure(let error) = result {
                     self.vaultError = "Couldn't reclaim space: \(error.localizedDescription)"
                 }
                 if !self.revealed {
                     self.detachVaultIfIdle()
+                } else {
+                    self.onPrivacyChange?()   // Explore writes what it held back
+                    self.warmUpVaultPlugins()
                 }
                 done()
             }
@@ -1516,6 +1625,11 @@ final class TagStore: ObservableObject {
                 guard let self else { return }
                 if emptied {
                     self.vaultEnabled = false
+                    // A new vault starts opted out again.
+                    self.exploreInVault = false
+                    self.endVaultWork()
+                    self.pluginsInVault = false
+                    UserDefaults.standard.set(false, forKey: "pluginsInVault")
                 } else {
                     outcome.error.map { self.vaultError = "Some files couldn't be restored: \($0)" }
                 }
@@ -1525,9 +1639,11 @@ final class TagStore: ObservableObject {
     }
 
     func popSet() {
-        let gi = activeGroupIndex
-        guard !groups[gi].sets.isEmpty else { return }
-        mutateSets(in: gi) { $0.removeLast() }
+        editQuery("Remove Circle") {
+            let gi = activeGroupIndex
+            guard !groups[gi].sets.isEmpty else { return }
+            mutateSets(in: gi) { $0.removeLast() }
+        }
     }
 
     /// Apply a change to one diagram's sets, remapping its painted regions so
@@ -1733,7 +1849,10 @@ final class TagStore: ObservableObject {
     /// (tags/totals/regions/selection) to venn-dump.json on each refresh.
     private func writeVennDump() {
         guard ProcessInfo.processInfo.environment["OVERLAP_VENN_DUMP"] != nil else { return }
-        let diagrams: [VennDump.Diagram] = groups.filter { !$0.sets.isEmpty }.map { g in
+        // Debug output, written in plain text: never a hidden set.
+        let diagrams: [VennDump.Diagram] = groups.filter { g in
+            !g.sets.isEmpty && !g.sets.contains(where: isHiddenTag)
+        }.map { g in
             let d = vennData(g.sets)
             return VennDump.Diagram(
                 tags: g.sets, totals: d.totals,
@@ -1824,7 +1943,49 @@ final class TagStore: ObservableObject {
 
     // MARK: - Undo infrastructure
 
+    private struct QuerySnapshot: Equatable {
+        var groups: [VennGroup]
+        var activeGroupID: UUID
+        var excludes: Set<String>
+    }
+
+    private var querySnapshot: QuerySnapshot {
+        QuerySnapshot(groups: groups, activeGroupID: activeGroupID, excludes: queryExcludes)
+    }
+
+    private func restoreQuery(_ snapshot: QuerySnapshot) {
+        groups = snapshot.groups
+        activeGroupID = snapshot.activeGroupID
+        queryExcludes = snapshot.excludes
+        refreshResults()
+    }
+
+    private func withoutUndo(_ body: () -> Void) {
+        let paused = recordingPaused
+        recordingPaused = true
+        body()
+        recordingPaused = paused
+    }
+
+    /// Run a query edit as one undo step; an edit that changed nothing leaves
+    /// no step behind.
+    private func editQuery(_ name: String, _ change: () -> Void) {
+        let before = querySnapshot
+        change()
+        let after = querySnapshot
+        guard after != before else {
+            return
+        }
+        push(name,
+             undo: { [weak self] in self?.restoreQuery(before) },
+             redo: { [weak self] in self?.restoreQuery(after) })
+    }
+
     private func push(_ name: String, undo: @escaping () -> Void, redo: @escaping () -> Void) {
+        // An undo that replays query edits mustn't record them again.
+        guard !recordingPaused else {
+            return
+        }
         undoStack.append(UndoStep(name: name, undo: undo, redo: redo))
         redoStack.removeAll()
         updateUndoFlags()
@@ -1840,14 +2001,14 @@ final class TagStore: ObservableObject {
 
     func performUndo() {
         guard let step = undoStack.popLast() else { return }
-        step.undo()
+        withoutUndo { step.undo() }
         redoStack.append(step)
         updateUndoFlags()
     }
 
     func performRedo() {
         guard let step = redoStack.popLast() else { return }
-        step.redo()
+        withoutUndo { step.redo() }
         undoStack.append(step)
         updateUndoFlags()
     }
@@ -1924,6 +2085,227 @@ final class TagStore: ObservableObject {
         !itemHidden(item) && !isVaultItem(item)
     }
 
+    // MARK: - Vault partition (hidden files' own plugin indexes)
+
+    /// Where the local ML plugins keep what they learn about hidden files: a
+    /// cache inside the attached vault. Nil unless opted in and revealed.
+    var vaultPartition: PluginPartition? {
+        guard pluginsInVault, vaultEnabled, revealed, !vaultRebuilding, VaultDisk.isAttached else { return nil }
+        return VaultDisk.pluginPartition
+    }
+
+    /// Turn the vault partition on or off. Off deletes what it learned.
+    func setPluginsInVault(_ on: Bool) {
+        guard on != pluginsInVault, vaultEnabled, canEditPrivacy, !vaultBusy else { return }
+        pluginsInVault = on
+        UserDefaults.standard.set(on, forKey: "pluginsInVault")
+        endVaultWork()
+        if on {
+            // Queued behind any "off" still deleting, so the new index isn't
+            // deleted under the warm-up.
+            VaultDisk.serially {
+                Task { @MainActor [weak self] in self?.warmUpVaultPlugins() }
+            }
+        } else {
+            exploreInVault = false
+            clearSuggestions()
+            // Closing the gate voids every partition handed out before, so a
+            // query already on its way can't launch into the vault afterwards.
+            VaultDisk.serially {
+                VaultRuns.closeAndKill()
+                VaultDisk.clearAppData(keepingExplore: false)
+                VaultRuns.reopen()
+            }
+        }
+        rerunPluginQueries()
+    }
+
+    /// A "like X" seed follows X into (or out of) the vault: in it, the seed
+    /// turns private with the file (stripped on lock, kept in the keychain)
+    /// instead of naming X's old path in the open.
+    private func remapSeeds(_ moves: [String: String]) {
+        guard !moves.isEmpty else { return }
+        if let images = similarTo, images.contains(where: { moves[$0.path] != nil }) {
+            similarTo = images.map { URL(fileURLWithPath: moves[$0.path] ?? $0.path) }
+        }
+        for gi in groups.indices {
+            groups[gi].sets = groups[gi].sets.map { QuerySet.remapSeeds($0, moves) }
+        }
+        queryExcludes = Set(queryExcludes.map { QuerySet.remapSeeds($0, moves) })
+        let remapped = savedQueries.map { $0.remappingSeeds(moves) }
+        if remapped.map(\.allTags) != savedQueries.map(\.allTags) {
+            savedQueries = remapped
+            persistSavedQueries()
+        }
+        NotificationCenter.default.post(name: .vaultSeedsMoved, object: self, userInfo: ["moves": moves])
+        NotDuplicates.remap(moves)
+        setHits = [:]
+        if vaultPartition == nil {
+            dropVaultSimilarSeeds()
+        }
+    }
+
+    /// The group minus hidden tags and hidden seeds, for a manifest in the open.
+    private func withoutHiddenSets(_ group: VennGroup) -> VennGroup {
+        var out = group
+        out.sets = group.sets.filter { !isHiddenTag($0) }
+        out.regions = Self.remapRegions(group.regions, from: group.sets, to: out.sets)
+        return out
+    }
+
+    /// Abandon vault work in flight: its results and progress no longer count.
+    private func endVaultWork() {
+        vaultGeneration += 1
+        vaultWarmingUp = false
+        vaultSuggestWarming = false
+        vaultIndexProgress = nil
+        lastVaultWarmedSig = ""
+        lastVaultSentCorpusSig = ""
+    }
+
+    /// Images that may seed a Find Similar: library files, and vault files
+    /// while the partition is open. A plugin embeds a source it hasn't indexed
+    /// in memory only, so a hidden one can rank the library without staying in it.
+    func similarSources(_ urls: [URL]) -> [URL] {
+        let vaultOpen = vaultPartition != nil
+        let known = Dictionary((allItems + queueItems + vaultItems).map { ($0.id, $0) },
+                               uniquingKeysWith: { first, _ in first })
+        return urls.filter { url in
+            let item = known[url.path] ?? FileItem.load(url)
+            return pluginMaySee(item) || (vaultOpen && isVaultItem(item))
+        }
+    }
+
+    private func libraryItem(_ item: FileItem) -> LibraryItem {
+        LibraryItem(path: item.url.path, kind: item.kind.rawValue, tags: item.tags, modDate: item.modDate)
+    }
+
+    /// Sync the vault partition over the hidden files: the suggest corpus,
+    /// then the search index. On reveal, and whenever files move in or out.
+    func warmUpVaultPlugins(force: Bool = false) {
+        guard let vault = vaultPartition, !vaultWarmingUp else { return }
+        let tagged = vaultItems.filter { !$0.tags.isEmpty }
+        let sig = Self.corpusSignature(of: tagged, withDates: true)
+        guard force || sig != lastVaultWarmedSig else { return }
+        if vaultItems.isEmpty {
+            // An empty library makes neither plugin forget anything: wipe it.
+            VaultDisk.serially { VaultDisk.clearAppData(keepingExplore: true) }
+            lastVaultWarmedSig = sig
+            lastVaultSentCorpusSig = sig
+            return
+        }
+        let generation = vaultGeneration
+        vaultWarmingUp = true
+        vaultSuggestWarming = true
+        vaultIndexProgress = "Indexing hidden files…"
+        let library = tagged.map(libraryItem)
+        let images = vaultItems.filter { $0.kind == .image }.map(libraryItem)
+        lastVaultSentCorpusSig = sig
+        let known = Array(knownTags)
+        let disabled = disabledPluginIDs, settings = pluginSettings
+        let report: @Sendable (String) -> Void = { [weak self] line in
+            Task { @MainActor in
+                if self?.vaultGeneration == generation, self?.vaultWarmingUp == true {
+                    self?.vaultIndexProgress = "Hidden files: \(line)"
+                }
+            }
+        }
+        Task.detached(priority: .utility) { [weak self] in
+            let suggestSynced = await SuggestionEngine.sync(library: library, knownTags: known, kinds: [.image],
+                                                            disabledIDs: disabled, pluginSettings: settings,
+                                                            partition: vault, onProgress: report)
+            let current = await MainActor.run { () -> Bool in
+                guard let self, self.vaultGeneration == generation else { return false }
+                self.vaultSuggestWarming = false
+                if !suggestSynced {
+                    self.lastVaultSentCorpusSig = ""   // the next suggest re-sends the corpus
+                }
+                self.autoSuggestSelection()
+                return true
+            }
+            guard current else { return }
+            let search = await SearchEngine.run(query: nil, library: images, disabledIDs: disabled,
+                                                pluginSettings: settings, partition: vault, onProgress: report)
+            let searchSynced = !search.ranPlugin || search.indexedCount != nil
+            await MainActor.run {
+                guard let self, self.vaultGeneration == generation else { return }
+                self.vaultWarmingUp = false
+                self.vaultIndexProgress = nil
+                // A failed run (timeout, crash, refused) is retried next time.
+                if suggestSynced && searchSynced {
+                    self.lastVaultWarmedSig = sig
+                }
+                self.rerunPluginQueries()
+                if suggestSynced && searchSynced {
+                    self.warmUpVaultPlugins()   // files that moved meanwhile
+                }
+            }
+        }
+    }
+
+    /// Hidden hits come and go with the vault partition: ask the plugins again.
+    private func rerunPluginQueries() {
+        if vaultPartition == nil {
+            dropVaultSimilarSeeds()
+        }
+        setHitsGeneration += 1
+        setHitsInFlight = []
+        setHits = [:]
+        if searchQuery != nil || similarTo != nil {
+            searching = true
+            startSearch(query: searchQuery, similarTo: similarTo?.map(\.path))
+        } else {
+            refreshResults()
+        }
+    }
+
+    /// Without the vault partition, a hidden image may not seed a query: the
+    /// library plugin would read it. Locking strips the circles too, through
+    /// `reconcileHiddenInQuery`; this also covers turning the partition off.
+    private func dropVaultSimilarSeeds() {
+        if let images = similarTo, images.contains(where: { VaultDisk.contains($0.path) }) {
+            clearSearch(refresh: false)
+        }
+        let seeded = { (raw: String) in QuerySet(raw).similarPaths.contains(where: VaultDisk.contains) }
+        queryExcludes = queryExcludes.filter { !seeded($0) }
+        for gi in groups.indices where groups[gi].sets.contains(where: seeded) {
+            let old = groups[gi].sets
+            groups[gi].sets = old.filter { !seeded($0) }
+            groups[gi].regions = Self.remapRegions(groups[gi].regions, from: old, to: groups[gi].sets)
+        }
+    }
+
+    /// Results seeded by hidden files: a Find Similar from a vault image, or
+    /// hidden Explore. Whatever is made from them is private.
+    var resultsFromHiddenSource: Bool {
+        if mode == .explore {
+            return exploreInVault
+        }
+        return similarTo?.contains { VaultDisk.contains($0.path) } ?? false
+    }
+
+    /// Explore over the hidden files only, with their own taste profile.
+    func setExploreInVault(_ on: Bool) {
+        guard on != exploreInVault, !on || vaultPartition != nil else { return }
+        exploreInVault = on
+    }
+
+    /// Files an Explore batch may show in the current context.
+    private func exploreMaySee(_ item: FileItem) -> Bool {
+        exploreInVault ? isVaultItem(item) : pluginMaySee(item)
+    }
+
+    /// Which of these paths an Explore batch may show.
+    func exploreAllows(_ paths: [String]) -> Set<String> {
+        let known = Dictionary(allItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return Set(paths.filter { path in
+            exploreMaySee(known[path] ?? FileItem.load(URL(fileURLWithPath: path)))
+        })
+    }
+
+    /// The vault files right now, for the hidden profile to drop what left.
+    var vaultPaths: Set<String> { Set(vaultItems.map(\.id)) }
+
     // MARK: - Source plugins (external services)
 
     /// Which of `urls` may leave the machine: the same rule as the suggest
@@ -1965,9 +2347,18 @@ final class TagStore: ObservableObject {
     /// persisted copy. O(catalog) but no allocation/serialization — ~1ms for
     /// thousands. (path.hashValue is per-launch, which is why the first run re-syncs.)
     private func corpusSignature() -> String {
+        Self.corpusSignature(of: allItems.filter(pluginMaySee))
+    }
+
+    /// `withDates`: an edited file counts as a change too.
+    private static func corpusSignature(of corpus: [FileItem], withDates: Bool = false) -> String {
         var h: UInt64 = 14695981039346656037
-        let corpus = allItems.filter(pluginMaySee)
         h = (h ^ UInt64(corpus.count)) &* 1099511628211
+        if withDates {
+            for it in corpus {
+                h = (h ^ (it.modDate?.timeIntervalSince1970 ?? 0).bitPattern) &* 1099511628211
+            }
+        }
         for it in corpus {
             h = (h ^ UInt64(bitPattern: Int64(it.url.path.hashValue))) &* 1099511628211
             for t in it.tags { h = (h ^ UInt64(bitPattern: Int64(t.hashValue))) &* 1099511628211 }
@@ -1990,7 +2381,7 @@ final class TagStore: ObservableObject {
         autoSuggestTask?.cancel()
         // Never run a selection suggest while a queue-wide run or index warm-up is
         // in flight: concurrent plugin processes would race the persistent indexes.
-        guard !queueSuggesting, !warmingUp else { return }
+        guard !queueSuggesting, !warmingUp, !vaultSuggestWarming else { return }
         guard autoSuggestEnabled, mode != .remote else { clearSuggestions(); return }
         let items = results.filter { selection.contains($0.id) }
         guard !items.isEmpty else { clearSuggestions(); return }
@@ -2021,40 +2412,68 @@ final class TagStore: ObservableObject {
                                      onlyPlugin: String? = nil,
                                      onProgress: @escaping @Sendable (String) -> Void,
                                      completion: @escaping @MainActor ([TagSuggestion]) -> Void) {
+        let vault = vaultPartition
+        let hidden = vault == nil ? [] : items.filter(isVaultItem)
         let items = items.filter(pluginMaySee)
-        guard !items.isEmpty else {
+        guard !items.isEmpty || !hidden.isEmpty else {
             completion([])
             return
         }
-        let files = items.map { RequestFile(path: $0.url.path, kind: $0.kind.rawValue,
-                                            ext: $0.ext, tags: $0.tags, size: $0.size,
-                                            modDate: $0.modDate, createdDate: $0.createdDate) }
         // Similarity plugins persist their own corpus index, so only re-send the
         // (potentially large) tagged library when it actually changed since the last
         // run — otherwise send nothing and let the plugin use its persisted copy.
         // This keeps a warm click from serializing + piping the whole catalog.
-        let sig = corpusSignature()
-        let library = sig != lastSentCorpusSig
-            ? taggedLibrary.map { LibraryItem(path: $0.url.path, kind: $0.kind.rawValue,
-                                              tags: $0.tags, modDate: $0.modDate) }
-            : []
-        lastSentCorpusSig = sig
-        let known = Array(knownTags.filter { !isHiddenTag($0) })
-        let kinds = Set(items.map(\.kind))
-        let settings = pluginSettings
-        var disabled = disabledPluginIDs
-        if let onlyPlugin {   // restrict this run to a single source
-            disabled.formUnion(PluginRegistry.discover().map(\.id).filter { $0 != onlyPlugin })
+        let library: [LibraryItem]
+        if items.isEmpty {
+            library = []
+        } else {
+            let sig = corpusSignature()
+            library = sig != lastSentCorpusSig ? taggedLibrary.map(libraryItem) : []
+            lastSentCorpusSig = sig
         }
+        // Hidden files ask the vault partition, which knows only hidden files
+        // and may suggest hidden tags.
+        let hiddenLibrary: [LibraryItem]
+        if hidden.isEmpty {
+            hiddenLibrary = []
+        } else {
+            let tagged = vaultItems.filter { !$0.tags.isEmpty }
+            let sig = Self.corpusSignature(of: tagged, withDates: true)
+            hiddenLibrary = sig != lastVaultSentCorpusSig ? tagged.map(libraryItem) : []
+            lastVaultSentCorpusSig = sig
+        }
+        let files = items.map(requestFile), hiddenFiles = hidden.map(requestFile)
+        let known = Array(knownTags.filter { !isHiddenTag($0) })
+        let allKnown = Array(knownTags)
+        let kinds = Set(items.map(\.kind)), hiddenKinds = Set(hidden.map(\.kind))
+        let settings = pluginSettings
+        let disabled = onlyPlugin.map { only in   // restrict this run to a single source
+            disabledPluginIDs.union(PluginRegistry.discover().map(\.id).filter { $0 != only })
+        } ?? disabledPluginIDs
 
         Task.detached(priority: .userInitiated) {
-            let merged = await SuggestionEngine.run(files: files, library: library,
-                                                    knownTags: known, kinds: kinds,
-                                                    disabledIDs: disabled,
-                                                    pluginSettings: settings,
-                                                    onProgress: onProgress)
+            async let visible = files.isEmpty ? [] : SuggestionEngine.run(
+                files: files, library: library, knownTags: known, kinds: kinds,
+                disabledIDs: disabled, pluginSettings: settings, onProgress: onProgress)
+            async let secret = hiddenFiles.isEmpty ? [] : SuggestionEngine.run(
+                files: hiddenFiles, library: hiddenLibrary, knownTags: allKnown, kinds: hiddenKinds,
+                disabledIDs: disabled, pluginSettings: settings, partition: vault ?? .library,
+                onProgress: onProgress)
+            // Face clusters are numbered per index: "Person 1" here and there
+            // are different people, so the hidden handles never merge.
+            let hiddenGroups = await secret.map { s -> TagSuggestion in
+                guard s.isGroup else { return s }
+                return TagSuggestion(tag: s.tag + " (hidden)", confidence: s.confidence, source: s.source,
+                                     paths: s.paths, isGroup: true)
+            }
+            let merged = SuggestionEngine.merge(await visible, hiddenGroups)
             await MainActor.run { completion(merged) }
         }
+    }
+
+    private func requestFile(_ item: FileItem) -> RequestFile {
+        RequestFile(path: item.url.path, kind: item.kind.rawValue, ext: item.ext, tags: item.tags,
+                    size: item.size, modDate: item.modDate, createdDate: item.createdDate)
     }
 
     /// Run the suggestion plugins on `items` and publish the merged results,
@@ -2108,6 +2527,10 @@ final class TagStore: ObservableObject {
             self.queueSuggesting = false
             self.queueSuggestProgress = nil
             self.rebuildQueueSections()
+            if self.warmUpAgain {
+                self.warmUpAgain = false
+                self.warmUpPlugins(force: true)
+            }
         })
     }
 
@@ -2226,7 +2649,12 @@ final class TagStore: ObservableObject {
     /// persistent indexes over the library). Skipped when the corpus hasn't
     /// changed since the last warm-up, unless forced from the Plugins menu.
     func warmUpPlugins(force: Bool = false) {
-        guard !warmingUp, !queueSuggesting else { return }
+        guard !warmingUp, !queueSuggesting else {
+            // A file just moved into the vault must leave the library index:
+            // run again once this one is done, whatever its signature says.
+            warmUpAgain = warmUpAgain || force || lastWarmedSig.isEmpty
+            return
+        }
         let sig = corpusSignature()
         guard force || sig != lastWarmedSig else { warmUpSearchIndex(); return }
         warmingUp = true
@@ -2249,6 +2677,11 @@ final class TagStore: ObservableObject {
                 self.warmingUp = false
                 self.warmupProgress = nil
                 self.lastWarmedSig = sig
+                if self.warmUpAgain {
+                    self.warmUpAgain = false
+                    self.warmUpPlugins(force: true)
+                    return
+                }
                 // Anything the warm-up blocked can go now, against a warm index.
                 if self.mode == .queue && self.queueGrouping && self.queueSuggestions.isEmpty {
                     self.suggestQueue()
@@ -2273,14 +2706,17 @@ final class TagStore: ObservableObject {
     /// The folders the Explore page draws from: the same roots as the corpus.
     /// `explorePaths` is what keeps the queue out.
     var exploreRoots: [String] {
-        ([scopeURL] + queueFolders).map { Self.canon($0.path).path }
+        if exploreInVault {
+            return [VaultDisk.filesRoot.path]
+        }
+        return ([scopeURL] + queueFolders).map { Self.canon($0.path).path }
     }
 
     /// The files batches may come from: the tagged library, so nothing still
     /// waiting in the queue, narrowed by THE query. Hidden files never make the list.
     var explorePaths: [String] {
         let predicate = queryPredicate()
-        return visibleItems.filter { (predicate?($0) ?? true) && pluginMaySee($0) }.map(\.id)
+        return visibleItems.filter { (predicate?($0) ?? true) && exploreMaySee($0) }.map(\.id)
     }
 
     /// Changes exactly when THE query does; empty when nothing is selected.
@@ -2293,8 +2729,16 @@ final class TagStore: ObservableObject {
     /// One Explore candidate pool from the plugin's index.
     func runExploreQuery(_ query: ExploreQuery) async -> SearchEngine.ExploreOutcome {
         let disabled = disabledPluginIDs, settings = pluginSettings
+        let partition: PluginPartition
+        if exploreInVault {
+            guard let vault = vaultPartition else { return SearchEngine.ExploreOutcome() }
+            partition = vault
+        } else {
+            partition = .library
+        }
         return await Task.detached(priority: .userInitiated) {
-            await SearchEngine.explore(query, disabledIDs: disabled, pluginSettings: settings)
+            await SearchEngine.explore(query, disabledIDs: disabled, pluginSettings: settings,
+                                       partition: partition)
         }.value
     }
 
@@ -2348,7 +2792,13 @@ final class TagStore: ObservableObject {
     /// Plugins menu (`force`). Skips when the corpus hasn't changed.
     func warmUpSearchIndex(force: Bool = false) {
         refreshSearchAvailability()
-        guard searchAvailable, !searchIndexing, !searching else { return }
+        guard searchAvailable else { return }
+        guard !searchIndexing, !searching else {
+            // Not dropped: a file just hidden must still leave the index.
+            searchWarmUpPending = true
+            searchWarmUpForced = searchWarmUpForced || force
+            return
+        }
         let scope = scopeURL, folders = queueFolders, depth = queueDepth
         var tagsByPath: [String: [String]] = [:]
         for it in allItems where !it.tags.isEmpty && pluginMaySee(it) { tagsByPath[it.id] = it.tags }
@@ -2412,8 +2862,8 @@ final class TagStore: ObservableObject {
     /// Rank the library by likeness to these images (averaged when several).
     /// The images themselves are left out; the tag query narrows the hits.
     func findSimilar(_ urls: [URL]) {
-        // Same rule as every plugin: hidden and vault files never go out.
-        let images = shareableForSource(urls).allowed
+        // Hidden files only while the vault partition is open.
+        let images = similarSources(urls)
             .filter { FileKind.of(contentType: nil, ext: $0.pathExtension) == .image }
         guard !images.isEmpty else { return }
         if mode != .tags && mode != .find {
@@ -2432,9 +2882,10 @@ final class TagStore: ObservableObject {
         let known = Set(allItems.map(\.id))
         let disabled = disabledPluginIDs, settings = pluginSettings
         let extras = searchExtras
+        let vault = vaultPartition
         Task.detached(priority: .userInitiated) { [weak self] in
-            let outcome = await SearchEngine.run(query: text, similarTo: paths, library: [],
-                                                 disabledIDs: disabled, pluginSettings: settings)
+            let outcome = await SearchEngine.run(query: text, similarTo: paths, disabledIDs: disabled,
+                                                 pluginSettings: settings, vault: vault)
             let hits = Array(outcome.hits.prefix(maxSearchHits))
             let hitPaths = Set(hits.map(\.path))
             var loaded = extras.filter { hitPaths.contains($0.key) }
@@ -2461,23 +2912,33 @@ final class TagStore: ObservableObject {
     /// Human-readable summary of THE query + search + type filter, e.g.
     /// `“girl with spiral hair” fashion + hair −by png`. Doubles as the
     /// suggested export folder name.
-    var queryDescription: String {
+    var queryDescription: String { describeQuery(publicOnly: false) }
+
+    /// `publicOnly`: leave out hidden tags and hidden seeds, for names that
+    /// land on disk in the open (export folders and manifests).
+    private func describeQuery(publicOnly: Bool) -> String {
+        let shown = { (raw: String) in !publicOnly || !self.isHiddenTag(raw) }
         var parts: [String] = []
         if let q = searchQuery { parts.append("“\(q)”") }
         if let images = similarTo, images.count > 0 {
-            parts.append(images.count == 1
-                         ? "like \(images[0].deletingPathExtension().lastPathComponent)"
-                         : "like \(images.count) images")
+            // Names folders and boards: a hidden image's name stays out of it.
+            if images.contains(where: { VaultDisk.contains($0.path) }) {
+                parts.append(images.count == 1 ? "like a hidden image" : "like \(images.count) images")
+            } else {
+                parts.append(images.count == 1
+                             ? "like \(images[0].deletingPathExtension().lastPathComponent)"
+                             : "like \(images.count) images")
+            }
         }
         var clause = ""
-        for g in groups where !g.sets.isEmpty {
+        for g in groups where g.sets.contains(where: shown) {
             let joiner = g.regions.isEmpty && g.mode == .any ? " or " : " + "
-            let text = g.sets.map(QuerySet.displayName).joined(separator: joiner)
+            let text = g.sets.filter(shown).map(QuerySet.displayName).joined(separator: joiner)
             if clause.isEmpty { clause = text }
             else { clause += (g.op == .or ? " or " : " and ") + text }
         }
         if !clause.isEmpty { parts.append(clause) }
-        parts.append(contentsOf: activeExcludes.map { "−\($0)" })
+        parts.append(contentsOf: activeExcludes.filter(shown).map { "−\(QuerySet.displayName($0))" })
         if !kindFilter.isEmpty { parts.append(kindFilter.map(\.rawValue).sorted().joined(separator: ",")) }
         if !extFilter.isEmpty { parts.append(extFilter.sorted().joined(separator: ",")) }
         return parts.isEmpty ? "All results" : parts.joined(separator: " ")
@@ -2488,14 +2949,31 @@ final class TagStore: ObservableObject {
     /// `.overlap-query.json` manifest. Folders in the results are skipped.
     func exportResults() {
         guard exportProgress == nil else { return }
-        let items = results.filter { $0.kind != .folder }
+        let all = results.filter { $0.kind != .folder }
+        guard !all.isEmpty else { return }
+        // Exporting a hidden file decrypts a copy into a plain folder: ask.
+        var items = all
+        let visible = all.filter { !itemHidden($0) && !isVaultItem($0) }
+        if visible.count < all.count {
+            switch QueryExporter.askAboutHidden(count: all.count - visible.count, total: all.count) {
+            case .skip:
+                items = visible
+            case .include:
+                break
+            case .cancel:
+                return
+            }
+        }
+        let skippedHidden = all.count - items.count
         guard !items.isEmpty else { return }
-        let description = queryDescription
+        // The folder name and manifest never name a hidden tag or a hidden seed.
+        let description = describeQuery(publicOnly: true)
         guard let choice = QueryExporter.askDestination(
             suggestedName: QueryExporter.folderName(for: description), count: items.count) else { return }
         let manifest = QueryExportManifest(
             created: Date(), scope: scopeURL.path, query: description,
-            groups: groups.filter { !$0.sets.isEmpty }, excludes: activeExcludes,
+            groups: groups.map(withoutHiddenSets).filter { !$0.sets.isEmpty },
+            excludes: activeExcludes.filter { !isHiddenTag($0) },
             kinds: kindFilter.map(\.rawValue).sorted(), exts: extFilter.sorted(),
             searchQuery: searchQuery, mode: choice.mode.rawValue, count: items.count)
         let urls = items.map(\.url)
@@ -2509,7 +2987,7 @@ final class TagStore: ObservableObject {
             }
             await MainActor.run {
                 self?.exportProgress = nil
-                QueryExporter.finish(outcome, folder: choice.folder, mode: choice.mode)
+                QueryExporter.finish(outcome, folder: choice.folder, mode: choice.mode, skippedHidden: skippedHidden)
             }
         }
     }
@@ -2586,7 +3064,7 @@ final class TagStore: ObservableObject {
 
         if !urls.isEmpty { lowSetTag(tag, on: urls, add: false) }
         if wasKnown { knownTags.remove(tag); saveKnownTags() }
-        clear(tag)
+        withoutUndo { clear(tag) }   // the Delete step below restores it
         recomputeCounts(); refreshVisible()
 
         push("Delete “\(tag)”",
@@ -2691,10 +3169,23 @@ final class TagStore: ObservableObject {
 
     private func lowTrash(_ urls: [URL]) -> [(original: URL, inTrash: URL)] {
         guard !urls.isEmpty else { return [] }
+        // Mid-move or mid-rebuild the vault is spoken for: its files stay put.
+        let requested = urls.count
+        let urls = vaultBusy || vaultRebuilding ? urls.filter { !VaultDisk.contains($0.path) } : urls
+        if urls.count < requested {
+            NSSound.beep()
+        }
         let ids = Set(urls.map { $0.path })
         let anchor = results.firstIndex { ids.contains($0.id) }
         var pairs: [(URL, URL)] = []
         for url in urls {
+            if VaultDisk.contains(url.path) {
+                // The system Trash is on the host disk: a hidden file stays encrypted.
+                if let dest = try? VaultDisk.trash(url) {
+                    pairs.append((url, dest))
+                }
+                continue
+            }
             var out: NSURL?
             if (try? FileManager.default.trashItem(at: url, resultingItemURL: &out)) != nil,
                let dest = out as URL? {
@@ -2702,6 +3193,7 @@ final class TagStore: ObservableObject {
             }
         }
         allItems.removeAll { ids.contains($0.id) }
+        vaultItems.removeAll { ids.contains($0.id) }
         queueItems.removeAll { ids.contains($0.id) }
         for id in ids { searchExtras.removeValue(forKey: id) }
         selection.subtract(ids)
@@ -2715,14 +3207,34 @@ final class TagStore: ObservableObject {
     }
 
     private func lowRestore(_ pairs: [(original: URL, inTrash: URL)]) {
-        for p in pairs { try? FileManager.default.moveItem(at: p.inTrash, to: p.original) }
-        readd(pairs.map { $0.original })
+        var restored: [URL] = []
+        for p in pairs {
+            // A hidden file comes back only into the open vault it left.
+            if VaultDisk.contains(p.original.path),
+               !(revealed && VaultDisk.isAttached) || vaultBusy || vaultRebuilding {
+                NSSound.beep()
+                continue
+            }
+            if (try? FileManager.default.moveItem(at: p.inTrash, to: p.original)) != nil {
+                restored.append(p.original)
+            }
+        }
+        readd(restored)
     }
 
     /// Re-add restored/returned files to the right in-memory list.
     private func readd(_ urls: [URL]) {
         for url in urls {
             let item = FileItem.load(url)
+            if VaultDisk.contains(url.path) {
+                if !vaultItems.contains(where: { $0.id == item.id }) {
+                    vaultItems.append(item)
+                }
+                if !allItems.contains(where: { $0.id == item.id }) {
+                    allItems.append(item)
+                }
+                continue
+            }
             if url.path.hasPrefix(scopeURL.path),
                !allItems.contains(where: { $0.id == item.id }) {
                 allItems.append(item)
@@ -2844,7 +3356,7 @@ final class TagStore: ObservableObject {
                 return nil
             }
             let item = catalog[url.path] ?? FileItem.load(url)
-            return pluginMaySee(item) ? item : nil
+            return exploreMaySee(item) ? item : nil
         }
     }
 
@@ -3114,13 +3626,17 @@ final class TagStore: ObservableObject {
 
 extension TagStore {
     /// Files a duplicate scan looks at: the current results, or every file
-    /// Overlap knows (tagged and queue). Hidden and vault files are left out,
-    /// as for the plugins, so their paths never reach the not-duplicates list.
+    /// Overlap knows (tagged and queue). Vault files join while revealed; a
+    /// hidden file still outside the vault never does.
     func duplicateCandidates(wholeLibrary: Bool) -> [URL] {
-        let pool = wholeLibrary ? allItems + queueItems : results
+        let pool = wholeLibrary ? allItems + queueItems + vaultItems : results
+        let withVault = revealed && VaultDisk.isAttached
         var seen = Set<String>()
-        return pool.filter { $0.kind != .folder && pluginMaySee($0) && seen.insert($0.id).inserted }
-            .map(\.url)
+        return pool.filter { item in
+            item.kind != .folder && (pluginMaySee(item) || (withVault && isVaultItem(item)))
+                && seen.insert(item.id).inserted
+        }
+        .map(\.url)
     }
 
     var duplicatePluginsAvailable: Bool {
@@ -3132,8 +3648,12 @@ extension TagStore {
     /// Trash. One undo step.
     func resolveDuplicates(keeper: URL, others: [URL], trashOthers: Bool) {
         let keeperTags = Set(TagIO.tags(of: keeper))
+        // A hidden tag on a file outside the vault would sit in the open and
+        // pull the keeper into the vault unasked: those stay behind.
+        let keeperHidden = VaultDisk.contains(keeper.path)
         var added: [String] = []
-        for tag in others.flatMap(TagIO.tags(of:)) where !keeperTags.contains(tag) && !added.contains(tag) {
+        for tag in others.flatMap(TagIO.tags(of:)) where !keeperTags.contains(tag) && !added.contains(tag)
+            && (keeperHidden || !isHiddenTag(tag)) {
             added.append(tag)
         }
         for tag in added {
@@ -3172,15 +3692,22 @@ extension TagStore {
             setHitsInFlight.insert(raw)
             let set = QuerySet(raw)
             let disabled = disabledPluginIDs, settings = pluginSettings
+            let vault = vaultPartition
+            let generation = setHitsGeneration
+            if vault == nil, set.similarPaths.contains(where: VaultDisk.contains) {
+                setHitsInFlight.remove(raw)
+                setHits[raw] = []
+                continue
+            }
             Task.detached(priority: .userInitiated) { [weak self] in
                 let outcome: SearchEngine.Outcome
                 switch set {
                 case .search(let text):
-                    outcome = await SearchEngine.run(query: text, library: [], disabledIDs: disabled,
-                                                     pluginSettings: settings)
+                    outcome = await SearchEngine.run(query: text, disabledIDs: disabled,
+                                                     pluginSettings: settings, vault: vault)
                 case .similar(let paths):
-                    outcome = await SearchEngine.run(query: nil, similarTo: paths, library: [],
-                                                     disabledIDs: disabled, pluginSettings: settings)
+                    outcome = await SearchEngine.run(query: nil, similarTo: paths, disabledIDs: disabled,
+                                                     pluginSettings: settings, vault: vault)
                 default:
                     outcome = SearchEngine.Outcome()
                 }
@@ -3189,7 +3716,7 @@ extension TagStore {
                     members.formUnion(paths)   // a "like these" circle holds them too
                 }
                 await MainActor.run {
-                    guard let self else {
+                    guard let self, self.setHitsGeneration == generation else {
                         return
                     }
                     self.setHitsInFlight.remove(raw)
@@ -3232,37 +3759,41 @@ extension TagStore {
 
     /// Paint only this region.
     func showOnlyRegion(group id: UUID, mask: Int) {
-        guard let i = groups.firstIndex(where: { $0.id == id }) else {
-            return
+        editQuery("Only This Region") {
+            guard let i = groups.firstIndex(where: { $0.id == id }) else {
+                return
+            }
+            groups[i].regions = [mask]
+            refreshResults()
         }
-        groups[i].regions = [mask]
-        refreshResults()
     }
 
     /// Everything the diagram matches now, minus this region. Turns a preset
     /// mode into painted regions first.
     func excludeRegion(group id: UUID, mask: Int) {
-        guard let i = groups.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-        let g = groups[i]
-        let full = (1 << g.sets.count) - 1
-        var painted = g.regions
-        if painted.isEmpty {
-            let live = vennData(g.sets).regions.keys
-            switch g.mode {
-            case .any:
-                painted = Set(live)
-            case .all, .only:
-                painted = [full]
+        editQuery("Exclude Region") {
+            guard let i = groups.firstIndex(where: { $0.id == id }) else {
+                return
             }
+            let g = groups[i]
+            let full = (1 << g.sets.count) - 1
+            var painted = g.regions
+            if painted.isEmpty {
+                let live = vennData(g.sets).regions.keys
+                switch g.mode {
+                case .any:
+                    painted = Set(live)
+                case .all, .only:
+                    painted = [full]
+                }
+            }
+            painted.remove(mask)
+            guard !painted.isEmpty else {
+                return
+            }
+            groups[i].regions = painted
+            refreshResults()
         }
-        painted.remove(mask)
-        guard !painted.isEmpty else {
-            return
-        }
-        groups[i].regions = painted
-        refreshResults()
     }
 
     /// Can this region be taken out without leaving the diagram empty?

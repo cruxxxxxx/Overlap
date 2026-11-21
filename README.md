@@ -47,7 +47,7 @@ Overlap reads and writes real macOS tags (`com.apple.metadata:_kMDItemUserTags`)
 - **Mood boards** — turn any query into a free-form canvas in its own window: drag, resize, align and snap tiles; add notes, labels and boxes; pull a color palette from the images; export as an image or a folder. Boards remember their query, so **Refresh** adds new matches (files you removed stay off).
 - **Connected services** — browse, import and sync collections from external image services, and send files back; ships with **Are.na**. Browse your feed, followed channels and any channel by link right in the main grid (Space for Quick Look), drag blocks onto your tags to save them, or import whole channels (tagged `arena/<Channel>`, stored as real files), link a board to a channel and sync both ways, or publish a board as a new channel. Tokens stay in the keychain; hidden files never leave your Mac, and every send is confirmed.
 - **Tag colors** — Finder's tag colors show in the sidebar and on chips; set one from a tag's menu and every file gets it, so Finder matches. Overlap keeps colors intact when it edits tags.
-- **Hidden tags** — passcode- or Touch ID-gated sensitive tags with per-tag default include/exclude, auto-lock, and an optional **encrypted vault** (AES-256 disk image) so hidden files are unreadable outside Overlap.
+- **Hidden tags** — passcode- or Touch ID-gated sensitive tags with per-tag default include/exclude, auto-lock, and an optional **encrypted vault** (AES-256 disk image) so hidden files are unreadable outside Overlap. With the vault on, hidden files can opt into search, suggestions and their own Explore; their plugin index lives inside the vault.
 - **Undo/redo** across every mutation (⌘Z / ⌘⇧Z), plus Stats, Fix Extension, Reveal, Export, and drag-out to other apps.
 
 ## Install
@@ -69,7 +69,7 @@ Overlap runs unsandboxed so it can read and write Finder tags across your folder
 ## Usage
 
 1. Point it at a folder (toolbar folder button, default `~/Pictures`). Spotlight must have indexed the scope for tags to appear.
-2. Filter by clicking sidebar tags (cycle include → exclude → off), or paint Venn regions under **Query** at the top of the sidebar (⌘D). Or wander: the **Explore** button on the results bar (⌘3) shows batches of images, random at first, then steered by what you like and look at. The profile stays on your Mac. Narrow by file **Type** as needed.
+2. Filter by clicking sidebar tags (cycle include → exclude → off), or paint Venn regions under **Query** at the top of the sidebar (⌘D). Or wander: the **Explore** button on the results bar (⌘3) shows an endless feed of images, random at first, then steered by what you like and look at. The profile stays on your Mac. Narrow by file **Type** as needed.
 3. Select files, press **T**, type a tag, ⏎ — tags are written to the files, so Finder and Spotlight see them immediately.
 4. **Queue**: add watched folders, set the subfolder depth, tag the untagged items, then **Apply** to move them into your library.
 5. **Search**: ⌘F, describe what you're looking for, ⏎. The first run downloads the models and indexes your images in the background (progress shows above the grid); later launches only index what changed. Escape clears the search.

@@ -141,20 +141,31 @@ struct VennView: View {
                     let solo = regions[soloMask] ?? 0
                     let inHover = hoverMask & soloMask != 0 && (regions[hoverMask] ?? 0) > 0
                     let soloOn = selectedRegions.contains(soloMask)
-                    Text(QuerySet.shortName(tags[i]))
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(soloOn ? Color.accentColor
-                                        : inHover ? Color.accentColor : Color.primary.opacity(0.8))
-                        .underline(soloOn)
-                        .shadow(color: colorScheme == .dark ? .black.opacity(0.6) : .white.opacity(0.6),
-                                radius: 2)
-                        .position(VennLayout.labelAnchor(i: i, k: k, centers: centers, radii: radii))
-                        .onTapGesture {
-                            if solo > 0 { onToggleRegion(soloMask) }
+                    HStack(spacing: 3) {
+                        Text(QuerySet.shortName(tags[i]))
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(soloOn ? Color.accentColor
+                                            : inHover ? Color.accentColor : Color.primary.opacity(0.8))
+                            .underline(soloOn)
+                            .onTapGesture {
+                                if solo > 0 { onToggleRegion(soloMask) }
+                            }
+                            .help(solo > 0
+                                  ? "Click: only \(QuerySet.displayName(tags[i])) (\(solo)) — the exclusive region"
+                                  : "No images are only in \(QuerySet.displayName(tags[i])) in this diagram")
+                        if hovering {
+                            Button { onRemoveTag(tags[i]) } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Remove \(QuerySet.displayName(tags[i])) from the diagram")
                         }
-                        .help(solo > 0
-                              ? "Click: only \(QuerySet.displayName(tags[i])) (\(solo)) — the exclusive region"
-                              : "No images are only in \(QuerySet.displayName(tags[i])) in this diagram")
+                    }
+                    .shadow(color: colorScheme == .dark ? .black.opacity(0.6) : .white.opacity(0.6),
+                            radius: 2)
+                    .position(VennLayout.labelAnchor(i: i, k: k, centers: centers, radii: radii))
                 }
             }
             .animation(.spring(response: 0.45, dampingFraction: 0.7), value: k)

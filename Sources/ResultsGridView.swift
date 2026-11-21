@@ -26,10 +26,10 @@ struct ResultsGridView: View {
             // Warm-up strip: plain row, no transition/safeAreaInset — inserting
             // animated content into the NavigationSplitView's safe area crashed
             // AppKit's constraint pass (NSHostingView display-cycle exception).
-            if store.warmingUp || store.searchIndexing || store.exportProgress != nil {
+            if store.warmingUp || store.searchIndexing || store.vaultWarmingUp || store.exportProgress != nil {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text(store.exportProgress ?? store.warmupProgress ?? store.searchProgress
+                    Text(store.exportProgress ?? store.warmupProgress ?? store.searchProgress ?? store.vaultIndexProgress
                          ?? (store.warmingUp ? "Preparing suggestions…" : "Indexing images for search…"))
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
@@ -587,8 +587,22 @@ struct ResultsGridView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 12) {
-                        ForEach(store.results) { item in
-                            resultCell(item, size: thumbSize)
+                        if store.mode == .explore && !explore.showingLiked {
+                            ForEach(Array(exploreBatchSections.enumerated()), id: \.offset) { index, items in
+                                Section {
+                                    ForEach(items) { item in
+                                        resultCell(item, size: thumbSize)
+                                    }
+                                } header: {
+                                    if index > 0 {
+                                        BatchDivider(number: index + 1)
+                                    }
+                                }
+                            }
+                        } else {
+                            ForEach(store.results) { item in
+                                resultCell(item, size: thumbSize)
+                            }
                         }
                     }
                     .padding(12)
@@ -609,10 +623,28 @@ struct ResultsGridView: View {
         .tutorialAnchor(.grid)
     }
 
-    /// A new Explore page gets a fresh scroll view: scrollTo can't reach lazy
+    /// The feed's results split back into the batches they came in, so each
+    /// batch can start under a divider.
+    private var exploreBatchSections: [[FileItem]] {
+        var batchOf: [String: Int] = [:]
+        for (index, batch) in explore.batches.enumerated() {
+            for url in batch {
+                batchOf[url.path] = index
+            }
+        }
+        var sections = explore.batches.map { _ in [FileItem]() }
+        for item in store.results {
+            if let index = batchOf[item.id] {
+                sections[index].append(item)
+            }
+        }
+        return sections.filter { !$0.isEmpty }
+    }
+
+    /// A new Explore feed gets a fresh scroll view: scrollTo can't reach lazy
     /// cells that arrive in the same update, so it wouldn't reliably jump back.
     private var explorePageKey: String {
-        store.mode == .explore ? "\(explore.batchIndex)-\(explore.showingLiked)" : ""
+        store.mode == .explore ? "\(explore.feedID)-\(explore.showingLiked)" : ""
     }
 
     private func resultCell(_ item: FileItem, size: CGFloat) -> some View {
@@ -624,7 +656,7 @@ struct ResultsGridView: View {
             .id(item.id)
             .onTapGesture(count: 2) { handleOpen(item) }
             .onTapGesture { handleClick(item) }
-            .onDrag { NSItemProvider(object: item.url as NSURL) }
+            .onDrag { HiddenDrag.provider(for: item.url) }
             .contextMenu { contextMenu(for: item) }
             .onAppear { loadMoreIfLast(item) }
     }
@@ -725,8 +757,13 @@ struct ResultsGridView: View {
     }
 
     private func loadMoreIfLast(_ item: FileItem) {
-        if store.mode == .remote && item.id == store.results.last?.id {
+        guard item.id == store.results.last?.id else {
+            return
+        }
+        if store.mode == .remote {
             remote.loadMore()
+        } else if store.mode == .explore {
+            explore.loadMore()
         }
     }
 
@@ -789,7 +826,7 @@ struct ResultsGridView: View {
                                             .id(item.id)
                                             .onTapGesture(count: 2) { handleOpen(item) }
                                             .onTapGesture { handleClick(item, within: section.items) }
-                                            .onDrag { NSItemProvider(object: item.url as NSURL) }
+                                            .onDrag { HiddenDrag.provider(for: item.url) }
                                             .contextMenu { contextMenu(for: item) }
                                     }
                                 }
@@ -1073,12 +1110,16 @@ struct ResultsGridView: View {
                 .keyboardShortcut("l", modifiers: .command)
         }
         Button("Reveal in Finder") {
-            NSWorkspace.shared.activateFileViewerSelecting(targetURLs(for: item))
+            let urls = targetURLs(for: item)
+            if HiddenExposure.confirm(urls, question: "Reveal %@ in Finder?", button: "Reveal") {
+                NSWorkspace.shared.activateFileViewerSelecting(urls)
+            }
         }
         Button("Copy Path") {
-            let paths = targetURLs(for: item).map(\.path).joined(separator: "\n")
+            let urls = targetURLs(for: item)
+            guard HiddenExposure.confirm(urls, question: "Copy the path of %@?", button: "Copy Path") else { return }
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(paths, forType: .string)
+            NSPasteboard.general.setString(urls.map(\.path).joined(separator: "\n"), forType: .string)
         }
         Button("Export…") { exportURLs(targetURLs(for: item)) }
         if item.kind == .image {
@@ -1164,5 +1205,19 @@ enum QuickLookOpener {
             QuickLookCache.noteHandoff(urls[index])
             return urls[index] as NSURL
         }
+    }
+}
+
+/// A thin rule where one Explore batch ends and the next begins.
+private struct BatchDivider: View {
+    let number: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+            Text("Batch \(number)").font(.caption2).foregroundStyle(.tertiary).fixedSize()
+            Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+        }
+        .padding(.vertical, 6)
     }
 }

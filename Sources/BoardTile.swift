@@ -108,8 +108,9 @@ struct BoardTile: View {
             .font(.system(size: 16))
             .foregroundStyle(.white, Color.black.opacity(0.55))
             .padding(4)
-            .onDrag { NSItemProvider(object: url as NSURL) }
-            .help("Drag the file out to Finder or another app")
+            .onDrag { HiddenDrag.provider(for: url) }
+            .help(VaultDisk.contains(url.path) ? "Hidden files drag only within Overlap; use Export to take them out"
+                                               : "Drag the file out to Finder or another app")
     }
 
     private func resolveFile() async {

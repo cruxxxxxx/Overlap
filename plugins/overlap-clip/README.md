@@ -38,6 +38,14 @@ comparable, so the index is rebuilt from scratch.
 | `minScore` | 0.15 | CLIP cosine cutoff; good matches usually land 0.2–0.35 |
 | `maxFileMB` | 25 | larger files are skipped when indexing |
 
+## Where it keeps things
+
+`OVERLAP_PLUGIN_CACHE` holds what it learns about files (`meta.json`, `clip.bin`).
+`OVERLAP_PLUGIN_SHARED_CACHE` holds `config.json` and the models; it defaults to the
+cache root. For hidden files Overlap points the cache at a folder inside its
+encrypted vault and sets `OVERLAP_PLUGIN_CACHE_STRICT=1`: a missing root then
+means the vault closed, and the plugin exits rather than recreate it.
+
 ## Try it from the shell
 
 ```sh

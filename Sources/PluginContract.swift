@@ -7,6 +7,15 @@ import Foundation
 /// stdin and reads a `SuggestResponse` (JSON) from its stdout. Nothing here is
 /// shared as a library — the contract IS the JSON, so plugins can be written in
 /// any language. Bump `PluginProtocol.version` on a breaking change.
+///
+/// Environment: `OVERLAP_PLUGIN_CACHE` is where a plugin keeps what it learns
+/// about files; `OVERLAP_PLUGIN_SHARED_CACHE` is for file-free assets (config,
+/// models). With `OVERLAP_PLUGIN_CACHE_STRICT=1` the cache root sits inside the
+/// vault (mounted at `OVERLAP_PLUGIN_CACHE_VOLUME`): if the root is missing or
+/// not on that volume, exit without creating anything. Only `"local": true`
+/// plugins are run there. That flag is the plugin's own promise: Overlap can't
+/// stop a plugin from writing elsewhere, so install only local plugins you trust. Never persist a `similarTo` source the request's
+/// library didn't include.
 enum PluginProtocol { static let version = 1 }
 
 // MARK: - Request (host → plugin stdin)
@@ -190,6 +199,7 @@ struct PluginManifest: Codable {
     var queryTimeoutMs: Int? = nil         // search plugins: per-query budget (index uses timeoutMs)
     var source: SourceInfo? = nil          // source plugins: how the host presents the provider
     var secrets: [PluginSecret]? = nil     // credentials the host keeps in the keychain
+    var local: Bool? = nil                 // true: never sends data off the Mac; may index hidden files
 }
 
 /// A manifest paired with its resolved on-disk location.
@@ -206,6 +216,10 @@ struct DiscoveredPlugin: Identifiable {
     /// Declared capabilities; a manifest without the key is a classic suggester.
     var capabilities: [String] { manifest.capabilities ?? ["suggest"] }
     func supports(_ capability: String) -> Bool { capabilities.contains(capability) }
+
+    /// Only plugins that declare themselves local, and talk to no service,
+    /// may work in the vault partition.
+    var mayUseVault: Bool { manifest.local == true && !supports("source") }
 }
 
 // MARK: - Shared JSON coders (ISO-8601 dates so any language can parse)

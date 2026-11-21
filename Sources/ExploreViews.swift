@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The Explore page's bar: batch paging and what the batch is drawn from.
+/// The Explore page's bar: the next batch and what the feed is drawn from.
 struct ExploreBar: View {
     @EnvironmentObject var store: TagStore
     @EnvironmentObject var boards: BoardStore
@@ -12,6 +12,18 @@ struct ExploreBar: View {
     var body: some View {
         HStack(spacing: 10) {
             ExploreToggle()
+            if store.vaultPartition != nil || store.exploreInVault {
+                Picker("Explore", selection: Binding(
+                    get: { store.exploreInVault },
+                    set: { store.setExploreInVault($0) })) {
+                    Text("Library").tag(false)
+                    Text("Hidden").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("Explore the hidden files, with a taste profile kept in the vault")
+            }
             if explore.showingLiked {
                 Button { explore.leaveLiked() } label: {
                     Image(systemName: "chevron.left")
@@ -19,12 +31,6 @@ struct ExploreBar: View {
                 .help("Back to the batch")
                 Text("Liked").font(.headline)
             } else {
-                Button { explore.back() } label: {
-                    Image(systemName: "chevron.left")
-                }
-                .disabled(explore.batchIndex == 0)
-                .keyboardShortcut("[", modifiers: .command)
-                .help("Previous batch")
                 Text(summary).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
@@ -48,7 +54,7 @@ struct ExploreBar: View {
             Slider(value: $thumbSize, in: 90...280).frame(width: 110)
             if !explore.showingLiked {
                 Button("Next Batch") { explore.next() }
-                    .help("Show the next batch (\(keys.label(.nextBatch))). \(keys.label(.like)) likes the selection, \(keys.label(.less)) asks for less like it, \(keys.label(.nextImage)) steps to the next image.")
+                    .help("Add a batch to the feed and jump to it (\(keys.label(.nextBatch))). \(keys.label(.like)) likes the selection, \(keys.label(.less)) asks for less like it, \(keys.label(.nextImage)) steps to the next image.")
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
@@ -66,14 +72,15 @@ struct ExploreBar: View {
     }
 
     private var batchSummary: String {
+        let batches = "\(explore.batches.count) \(explore.batches.count == 1 ? "batch" : "batches")"
         if explore.focusedTaste != nil {
-            return "Batch \(explore.batchIndex + 1) · from one taste"
+            return "\(batches) · from one taste"
         }
         if explore.isColdStart {
-            return "Batch \(explore.batchIndex + 1) · random picks. Like what catches your eye."
+            return "\(batches) · random picks. Like what catches your eye."
         }
-        let count = explore.profile.tastes.count
-        return "Batch \(explore.batchIndex + 1) · from \(count) \(count == 1 ? "taste" : "tastes"), plus a few surprises"
+        let count = explore.profile.drawnTastes.count
+        return "\(batches) · from \(count) \(count == 1 ? "taste" : "tastes"), plus a few surprises"
     }
 
     private func makeBoard() {
@@ -204,10 +211,15 @@ struct TasteSections: View {
                 Text("Like a few images and your tastes appear here. Everything stays on this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            ForEach(explore.profile.tastes) { taste in
+            ForEach(explore.profile.drawnTastes) { taste in
                 TasteRow(taste: taste,
-                         share: taste.weight / max(explore.profile.tastes.map(\.weight).max() ?? 1, 0.001),
+                         share: taste.weight / max(explore.profile.tastes.first?.weight ?? 1, 0.001),
                          focused: explore.focusedTaste == taste.id)
+            }
+            let waiting = explore.profile.tastes.count - explore.profile.drawnTastes.count
+            if waiting > 0 {
+                Text("\(waiting) more forming. Like more of one to bring it up.")
+                    .font(.caption).foregroundStyle(.tertiary)
             }
         }
     }

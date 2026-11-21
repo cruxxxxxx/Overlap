@@ -161,11 +161,38 @@ enum QueryExporter {
         return (url, mode)
     }
 
+    enum HiddenChoice { case skip, include, cancel }
+
+    /// Some results are hidden files: exporting decrypts copies into a plain
+    /// folder that stays readable after locking. Ask; skipping is the default.
+    @MainActor
+    static func askAboutHidden(count: Int, total: Int) -> HiddenChoice {
+        let alert = NSAlert()
+        alert.messageText = count == total
+            ? "All \(total) results are hidden files"
+            : "\(count) of \(total) results are hidden files"
+        alert.informativeText = "Exporting them puts unencrypted copies in a normal folder, readable outside Overlap even after you lock."
+        alert.addButton(withTitle: "Skip Hidden Files")
+        alert.addButton(withTitle: "Export Them Too")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .skip
+        case .alertSecondButtonReturn:
+            return .include
+        default:
+            return .cancel
+        }
+    }
+
     /// After the work: reveal the folder; explain anything that didn't go to plan.
     @MainActor
-    static func finish(_ outcome: Outcome, folder: URL, mode: ExportMode) {
+    static func finish(_ outcome: Outcome, folder: URL, mode: ExportMode, skippedHidden: Int = 0) {
         NSWorkspace.shared.activateFileViewerSelecting([folder])
         var notes: [String] = []
+        if skippedHidden > 0 {
+            notes.append("\(skippedHidden) hidden file\(skippedHidden == 1 ? " was" : "s were") left out.")
+        }
         if mode == .hardLink && outcome.fellBack > 0 {
             notes.append("\(outcome.fellBack) file\(outcome.fellBack == 1 ? "" : "s") couldn't be hard-linked (different volume, iCloud Drive, or a non-APFS disk) and were copied instead.")
         }

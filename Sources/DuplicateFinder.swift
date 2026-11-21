@@ -86,20 +86,23 @@ enum DuplicateFinder {
         return Data(hasher.finalize())
     }
 
-    /// Near-duplicate pairs from every enabled `duplicates` plugin.
+    /// Near-duplicate pairs from every enabled `duplicates` plugin, within one
+    /// partition's index: library against library, or hidden against hidden.
     nonisolated static func nearPairs(threshold: Double, paths: [String]?,
                                       disabledIDs: Set<String>,
                                       pluginSettings: [String: [String: SettingValue]],
+                                      partition: PluginPartition = .library,
                                       onProgress: @escaping @Sendable (String) -> Void) -> [DuplicatePair] {
         var pairs: [DuplicatePair] = []
-        for plugin in SearchEngine.searchPlugins(disabledIDs: disabledIDs, capability: "duplicates") {
+        for plugin in SearchEngine.searchPlugins(disabledIDs: disabledIDs, capability: "duplicates",
+                                                 partition: partition) {
             let request = SuggestRequest(
                 files: [], knownTags: nil, library: nil,
                 settings: TagStore.effectiveSettings(for: plugin, stored: pluginSettings),
                 duplicates: DuplicatesQuery(threshold: threshold, paths: paths))
             let timeout = plugin.manifest.queryTimeoutMs ?? 60_000
             let response = SuggestionEngine.runProcess(plugin, request: request, timeoutMs: timeout,
-                                                       onProgress: onProgress)
+                                                       partition: partition, onProgress: onProgress)
             pairs += response?.pairs ?? []
         }
         return pairs
@@ -164,26 +167,51 @@ enum DuplicateFinder {
 }
 
 /// Pairs the user said aren't duplicates, kept in
-/// `~/Library/Application Support/Overlap/not-duplicates.json`.
+/// `~/Library/Application Support/Overlap/not-duplicates.json`; a pair with a
+/// hidden file goes in the vault's own copy instead.
 enum NotDuplicates {
     nonisolated static func key(_ a: String, _ b: String) -> String {
         a < b ? a + "\n" + b : b + "\n" + a
     }
 
     private static var fileURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        if let path = ProcessInfo.processInfo.environment["OVERLAP_NOT_DUPLICATES"] {
+            return URL(fileURLWithPath: path)   // tests: never the real list
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Overlap/not-duplicates.json")
     }
 
-    static func load() -> Set<String> {
-        guard let data = try? Data(contentsOf: fileURL),
+    private static var vaultFileURL: URL {
+        VaultDisk.appDataRoot.appendingPathComponent("not-duplicates.json")
+    }
+
+    private static var vaultOpen: Bool { PluginPartition.isMounted(VaultDisk.mountURL) }
+
+    /// The library pairs, plus the hidden ones while revealed.
+    static func load(includingHidden: Bool) -> Set<String> {
+        var pairs = read(fileURL)
+        if includingHidden && vaultOpen {
+            pairs += read(vaultFileURL)
+        }
+        return Set(pairs.map { key($0[0], $0[1]) })
+    }
+
+    private static func read(_ url: URL) -> [[String]] {
+        guard let data = try? Data(contentsOf: url),
               let pairs = try? JSONDecoder().decode([[String]].self, from: data) else {
             return []
         }
-        return Set(pairs.filter { $0.count == 2 }.map { key($0[0], $0[1]) })
+        return pairs.filter { $0.count == 2 }
     }
 
-    static func add(_ paths: [String], to current: inout Set<String>) {
+    private static func isHidden(_ pair: [String]) -> Bool {
+        pair.contains(where: VaultDisk.contains)
+    }
+
+    /// `includingHidden`: the caller holds the hidden pairs (revealed). Without
+    /// them, writing the vault copy would wipe it.
+    static func add(_ paths: [String], to current: inout Set<String>, includingHidden: Bool) {
         for (i, a) in paths.enumerated() {
             for b in paths[(i + 1)...] {
                 current.insert(key(a, b))
@@ -197,8 +225,31 @@ enum NotDuplicates {
         current = Set(pairs.map { key($0[0], $0[1]) })
         try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
+        write(pairs.filter { !isHidden($0) }, to: fileURL)
+        if includingHidden && vaultOpen {
+            write(pairs.filter(isHidden), to: vaultFileURL)
+        }
+    }
+
+    /// Files moved into or out of the vault (old path → new): their pairs
+    /// follow them, so a hidden file's old path leaves the plain list.
+    static func remap(_ moves: [String: String]) {
+        let open = vaultOpen
+        let plain = read(fileURL)
+        let hidden = open ? read(vaultFileURL) : []
+        let remapped = (plain + hidden).map { $0.map { moves[$0] ?? $0 } }
+        let newPlain = remapped.filter { !isHidden($0) }
+        if newPlain != plain {
+            write(newPlain, to: fileURL)
+        }
+        if open {
+            write(remapped.filter(isHidden), to: vaultFileURL)
+        }
+    }
+
+    private static func write(_ pairs: [[String]], to url: URL) {
         if let data = try? JSONEncoder().encode(pairs) {
-            try? data.write(to: fileURL, options: .atomic)
+            try? data.write(to: url, options: .atomic)
         }
     }
 }

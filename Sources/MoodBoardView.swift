@@ -247,7 +247,7 @@ struct MoodBoardView: View {
                                    value: geo.frame(in: .named(BoardCanvas.scroll)).origin)
         })
         .onPreferenceChange(ScrollOriginKey.self) { scrollOrigin = $0 }
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers, location in
+        .onDrop(of: HiddenDrag.dropTypes, isTargeted: nil) { providers, location in
             dropFiles(providers, at: location)
         }
     }
@@ -845,7 +845,12 @@ struct MoodBoardView: View {
         let paths = targets(item)
         Button("Quick Look") { QuickLookOpener.open(urls(paths)) }
         Button("Open") { urls(paths).forEach { NSWorkspace.shared.open($0) } }
-        Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls(paths)) }
+        Button("Reveal in Finder") {
+            let list = urls(paths)
+            if HiddenExposure.confirm(list, question: "Reveal %@ in Finder?", button: "Reveal") {
+                NSWorkspace.shared.activateFileViewerSelecting(list)
+            }
+        }
         Divider()
         Button("Bring to Front") { bringToFront(paths) }
         Button("Send to Back") { sendToBack(paths) }
@@ -855,35 +860,20 @@ struct MoodBoardView: View {
     }
 
     private func dropFiles(_ providers: [NSItemProvider], at location: CGPoint) -> Bool {
-        let fileProviders = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        let fileProviders = providers.filter { provider in
+            HiddenDrag.dropTypes.contains { provider.hasItemConformingToTypeIdentifier($0.identifier) }
+        }
         guard !fileProviders.isEmpty else {
             return false
         }
         let point = CGPoint(x: max(0, location.x / zoom), y: max(0, location.y / zoom))
         Task { @MainActor in
-            var urls: [URL] = []
-            for provider in fileProviders {
-                if let url = await Self.loadFileURL(provider) {
-                    urls.append(url)
-                }
-            }
+            let urls = await HiddenDrag.urls(from: fileProviders)
             // Previews dragged in from a connected service are saved first.
             let paths = await store.libraryURLs(for: urls).map { VaultDisk.originalPath(of: $0.path) }
             await boards.addFiles(paths, to: boardID, at: point, undo: undoManager)
         }
         return true
-    }
-
-    private static func loadFileURL(_ provider: NSItemProvider) async -> URL? {
-        await withCheckedContinuation { continuation in
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
-                if let data = data as? Data {
-                    continuation.resume(returning: URL(dataRepresentation: data, relativeTo: nil))
-                } else {
-                    continuation.resume(returning: data as? URL)
-                }
-            }
-        }
     }
 
     private func refreshLockedFilter() {
@@ -899,7 +889,7 @@ struct MoodBoardView: View {
     private var sourceLink: SourceLink? { sources.link(forBoard: boardID) }
 
     private var boardIsPrivate: Bool {
-        board?.source.map { store.isPrivateQuery($0) } ?? false
+        board?.privateBoard == true || (board?.source.map { store.isPrivateQuery($0) } ?? false)
     }
 
     private func sourceName(_ link: SourceLink) -> String {

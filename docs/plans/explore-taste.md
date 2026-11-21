@@ -9,7 +9,7 @@ Status: first version built 2026-11-01, to iterate by use. The old Explore tab
   and Tastes added on top. The Library tab remembers whether you were exploring.
 - First visit: 24 random images. Like with the heart or Q; W for "less like this";
   Space for the next image, which draws a new batch past the last one; E for the
-  next batch; R for Quick Look; ⌘[ goes back a batch. Q, W, Space and R work over
+  next batch; R for Quick Look. Batches append to one feed, so earlier ones are a scroll up. Q, W, Space and R work over
   Quick Look, but a new batch never draws under it. Rebind in Overlap ▸ Settings.
 - Sidebar: Liked (all likes, can become a board), and one row per taste with its
   latest liked image. Click a taste to draw only from it; right-click to forget it.

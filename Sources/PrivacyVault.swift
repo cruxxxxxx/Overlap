@@ -1,5 +1,6 @@
 import AppKit
 import CommonCrypto
+import UniformTypeIdentifiers
 import LocalAuthentication
 import Security
 
@@ -192,6 +193,15 @@ enum VaultDisk {
     static var bundleURL: URL { baseDir.appendingPathComponent("Vault.sparsebundle") }
     static var mountURL: URL { baseDir.appendingPathComponent(".vault", isDirectory: true) }
     static var filesRoot: URL { mountURL.appendingPathComponent("Files", isDirectory: true) }
+    /// What Overlap learns about hidden files: plugin indexes and the hidden
+    /// Explore profile. Never on the host disk.
+    static var appDataRoot: URL { mountURL.appendingPathComponent("AppData", isDirectory: true) }
+    static var pluginCacheRoot: URL { appDataRoot.appendingPathComponent("PluginCache", isDirectory: true) }
+    /// Hidden files deleted from Overlap: kept for Undo until the vault
+    /// closes, never in the system Trash (which is on the host disk).
+    static var trashRoot: URL { mountURL.appendingPathComponent("Trash", isDirectory: true) }
+    /// Everything `rebuild` carries over to a fresh image.
+    private static var contentRoots: [URL] { [filesRoot, appDataRoot, trashRoot] }
 
     static var exists: Bool { FileManager.default.fileExists(atPath: bundleURL.path) }
 
@@ -260,10 +270,82 @@ enum VaultDisk {
                     password: key)
     }
 
+    /// Attach, detach, rebuild, destroy and clearing app data run one at a
+    /// time: a scrub after a detach must never meet a vault a reveal just
+    /// attached. Recursive, as rebuild detaches and attaches inside.
+    private static let lifecycle = NSRecursiveLock()
+    private static let queue = DispatchQueue(label: "overlap.vault.lifecycle")
+
+    /// Run `work` after every vault job queued before it, under the lifecycle lock.
+    static func serially(_ work: @escaping @Sendable () -> Void) {
+        queue.async {
+            lifecycle.withLock(work)
+        }
+    }
+
+    /// `serially`, awaited: attaches and detaches go through here, so a lock
+    /// then a quick reveal can't run in the other order.
+    static func inOrder<T>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            serially {
+                continuation.resume(with: Result { try work() })
+            }
+        }
+    }
+
+    /// For quit, on the main thread: detach unless another vault job holds
+    /// the lifecycle (then `applicationShouldTerminate`'s own detach, queued
+    /// off-main, finishes the job). Never blocks on it.
+    static func detachAtQuit() {
+        guard lifecycle.try() else {
+            VaultRuns.close()
+            return
+        }
+        defer { lifecycle.unlock() }
+        detach()
+    }
+
     static func attach(key: String) throws {
-        guard !isAttached else { return }
-        try attach(bundleURL, at: mountURL, key: key)
-        try FileManager.default.createDirectory(at: filesRoot, withIntermediateDirectories: true)
+        try attach(key: key, emptyingTrash: true)
+    }
+
+    /// `emptyingTrash`: on a real unlock, the trash can only be left over from
+    /// a crash while revealed, its Undo gone with the app. Callers that find
+    /// the vault already attached (moves while revealed) never empty it.
+    private static func attach(key: String, emptyingTrash: Bool) throws {
+        try lifecycle.withLock {
+            if !isAttached {
+                try attach(bundleURL, at: mountURL, key: key)
+                if emptyingTrash {
+                    self.emptyTrash()
+                }
+            }
+            try FileManager.default.createDirectory(at: filesRoot, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: pluginCacheRoot, withIntermediateDirectories: true)
+            VaultRuns.reopen()
+        }
+    }
+
+    /// Forget what Overlap learned about hidden files: the plugin indexes and,
+    /// unless kept, the hidden Explore profile. Only on the mounted vault.
+    static func clearAppData(keepingExplore: Bool) {
+        lifecycle.lock()
+        defer { lifecycle.unlock() }
+        guard PluginPartition.isMounted(mountURL) else { return }
+        let fm = FileManager.default
+        for url in (try? fm.contentsOfDirectory(at: pluginCacheRoot, includingPropertiesForKeys: nil)) ?? [] {
+            try? fm.removeItem(at: url)
+        }
+        if !keepingExplore {
+            try? fm.removeItem(at: exploreProfileURL)
+        }
+    }
+
+    static var exploreProfileURL: URL { appDataRoot.appendingPathComponent("explore-profile.json") }
+
+    /// The vault partition for the local ML plugins (see `PluginPartition`).
+    static var pluginPartition: PluginPartition {
+        .vault(pluginCacheRoot, volume: mountURL, epoch: VaultRuns.currentEpoch)
     }
 
     private static func attach(_ bundle: URL, at mount: URL, key: String) throws {
@@ -275,7 +357,30 @@ enum VaultDisk {
     /// Detach, forcing it if something (a Quick Look panel, an editor) still
     /// holds a file open. Locking must win.
     static func detach() {
-        detach(mountURL)
+        detach(emptyingTrash: true)   // undo history is gone with the lock
+    }
+
+    private static func detach(emptyingTrash: Bool) {
+        lifecycle.withLock {
+            VaultRuns.closeAndKill()   // no plugin may run while the volume goes
+            if emptyingTrash {
+                self.emptyTrash()
+            }
+            detach(mountURL)
+            scrubMountPoint()
+        }
+    }
+
+    /// Once detached, the mount point is a plain folder on the host disk.
+    /// Anything in it was written after the vault closed, so it goes; each
+    /// entry is checked to sit on the host disk, never on a mounted vault.
+    private static func scrubMountPoint() {
+        guard !isAttached, let host = PluginPartition.device(of: baseDir) else { return }
+        let fm = FileManager.default
+        for url in (try? fm.contentsOfDirectory(at: mountURL, includingPropertiesForKeys: nil)) ?? []
+            where PluginPartition.device(of: url) == host {
+            try? fm.removeItem(at: url)
+        }
     }
 
     private static func detach(_ mount: URL) {
@@ -287,10 +392,35 @@ enum VaultDisk {
 
     /// Delete the image and its key. The caller has already moved files out.
     static func destroy() {
-        detach()
-        try? FileManager.default.removeItem(at: bundleURL)
-        try? FileManager.default.removeItem(at: mountURL)
-        deleteKey()
+        lifecycle.withLock {
+            detach()
+            guard !isAttached else { return }   // never delete through a live mount
+            try? FileManager.default.removeItem(at: bundleURL)
+            try? FileManager.default.removeItem(at: mountURL)
+            deleteKey()
+        }
+    }
+
+    /// Move a hidden file into the vault trash. Returns where it went.
+    static func trash(_ url: URL) throws -> URL {
+        try lifecycle.withLock {
+            guard contains(url.path), PluginPartition.isMounted(mountURL) else {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            let folder = trashRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let dest = folder.appendingPathComponent(url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: dest)
+            return dest
+        }
+    }
+
+    /// Delete the vault trash for good. Only on the mounted vault.
+    static func emptyTrash() {
+        lifecycle.withLock {
+            guard PluginPartition.isMounted(mountURL) else { return }
+            try? FileManager.default.removeItem(at: trashRoot)
+        }
     }
 
     /// Every regular file inside the attached vault, minus the bookkeeping
@@ -326,7 +456,8 @@ enum VaultDisk {
 
     /// Bundle size on the host disk vs bytes the vault's files actually use.
     static func usage() -> Usage {
-        Usage(onDisk: allocatedSize(of: bundleURL), inUse: allocatedSize(of: filesRoot))
+        Usage(onDisk: allocatedSize(of: bundleURL),
+              inUse: contentRoots.reduce(0) { $0 + allocatedSize(of: $1) })
     }
 
     private static func allocatedSize(of dir: URL) -> Int64 {
@@ -342,6 +473,15 @@ enum VaultDisk {
     /// Reclaim freed space: copy the vault's files into a fresh image and swap
     /// it in. Needs free space for the files in use; leaves the new vault attached.
     static func rebuild(key: String) throws {
+        lifecycle.lock()
+        defer { lifecycle.unlock() }
+        // A plugin writing its index mid-copy would leave a torn copy behind.
+        VaultRuns.closeAndKill()
+        defer {
+            if isAttached {
+                VaultRuns.reopen()
+            }
+        }
         let fm = FileManager.default
         let freshURL = baseDir.appendingPathComponent("Vault-rebuild.sparsebundle")
         let freshMount = baseDir.appendingPathComponent(".vault-rebuild", isDirectory: true)
@@ -350,18 +490,21 @@ enum VaultDisk {
         do {
             try attach(freshURL, at: freshMount, key: key)
             // ditto keeps extended attributes, so Finder tags survive the copy.
-            try run("/usr/bin/ditto", [filesRoot.path, freshMount.appendingPathComponent("Files").path])
+            for root in contentRoots where FileManager.default.fileExists(atPath: root.path) {
+                try run("/usr/bin/ditto", [root.path, freshMount.appendingPathComponent(root.lastPathComponent).path])
+            }
         } catch {
             detach(freshMount)
             try? fm.removeItem(at: freshURL)
             throw error
         }
         detach(freshMount)
-        detach()
+        // The trash went over with the rest: Undo still finds it.
+        detach(emptyingTrash: false)
         try fm.removeItem(at: bundleURL)
         try fm.moveItem(at: freshURL, to: bundleURL)
         try? fm.removeItem(at: freshMount)
-        try attach(key: key)
+        try attach(key: key, emptyingTrash: false)
     }
 
     // Process plumbing
@@ -396,6 +539,86 @@ enum VaultDisk {
             throw VaultError.hdiutil(message.isEmpty ? "\(tool) failed" : message)
         }
         return out
+    }
+}
+
+// MARK: - Handing hidden files to other apps
+
+enum HiddenExposure {
+    /// Before a hidden file's path leaves Overlap (Finder, the clipboard),
+    /// where it outlives the lock: ask. True to go ahead.
+    @MainActor
+    /// `question` has one `%@`, replaced by "a hidden file" or "3 hidden files".
+    static func confirm(_ urls: [URL], question: String, button: String) -> Bool {
+        let hidden = urls.filter { VaultDisk.contains($0.path) }.count
+        guard hidden > 0 else { return true }
+        let alert = NSAlert()
+        alert.messageText = question.replacingOccurrences(
+            of: "%@", with: hidden == 1 ? "a hidden file" : "\(hidden) hidden files")
+        alert.informativeText = "Its location inside the vault goes to another app, which may remember it after you lock."
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+}
+
+extension UTType {
+    /// A hidden file dragged inside Overlap. Not a file URL, and visible to
+    /// this process only: Finder and other apps can't take the drop, so a
+    /// hidden file leaves Overlap only through Export, which asks.
+    static let overlapHiddenFile = UTType(exportedAs: "com.mike.overlap.hidden-file")
+}
+
+enum HiddenDrag {
+    /// The drag item for `url`: its file URL, or for a vault file the
+    /// in-app type only.
+    static func provider(for url: URL) -> NSItemProvider {
+        guard VaultDisk.contains(url.path) else {
+            return NSItemProvider(object: url as NSURL)
+        }
+        let provider = NSItemProvider()
+        let path = url.path
+        provider.registerDataRepresentation(forTypeIdentifier: UTType.overlapHiddenFile.identifier,
+                                            visibility: .ownProcess) { done in
+            done(Data(path.utf8), nil)
+            return nil
+        }
+        return provider
+    }
+
+    /// Drop types for an in-app target that takes files, hidden ones included.
+    static let dropTypes: [UTType] = [.fileURL, .overlapHiddenFile]
+
+    /// The files in a drop, hidden drags included.
+    static func urls(from providers: [NSItemProvider]) async -> [URL] {
+        var urls: [URL] = []
+        for provider in providers {
+            if let url = await url(from: provider) {
+                urls.append(url)
+            }
+        }
+        return urls
+    }
+
+    private static func url(from provider: NSItemProvider) async -> URL? {
+        await withCheckedContinuation { continuation in
+            if provider.hasItemConformingToTypeIdentifier(UTType.overlapHiddenFile.identifier) {
+                _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.overlapHiddenFile.identifier) { data, _ in
+                    continuation.resume(returning: data.flatMap { String(data: $0, encoding: .utf8) }
+                        .map { URL(fileURLWithPath: $0) })
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
+                    if let data = data as? Data {
+                        continuation.resume(returning: URL(dataRepresentation: data, relativeTo: nil))
+                    } else {
+                        continuation.resume(returning: data as? URL)
+                    }
+                }
+            } else {
+                continuation.resume(returning: nil)
+            }
+        }
     }
 }
 
@@ -568,7 +791,7 @@ final class AutoLock {
             $0.idleTimer?.invalidate()
         }
         observe(NotificationCenter.default, NSApplication.willTerminateNotification) { _ in
-            VaultDisk.detach()
+            VaultDisk.detachAtQuit()
         }
     }
 

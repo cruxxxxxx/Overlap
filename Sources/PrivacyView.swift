@@ -201,6 +201,16 @@ struct PrivacyView: View {
         Text("The vault grows as files move in. Space freed inside it is reused by later hides; Reclaim Space rebuilds the vault to return it to the disk.")
             .font(.caption2).foregroundStyle(.tertiary)
             .fixedSize(horizontal: false, vertical: true)
+        Toggle("Search, suggestions and Explore for hidden files", isOn: Binding(
+            get: { store.pluginsInVault },
+            set: { store.setPluginsInVault($0) }))
+            .disabled(store.vaultStatus != nil)
+        Text(store.vaultIndexProgress
+             ?? (store.pluginsInVault
+                 ? "Hidden files get their own plugin index, stored inside the vault and readable only while revealed. Only plugins marked local take part; online services never see them."
+                 : "Off: plugins never see hidden files. Turning this off deletes the hidden index and the hidden Explore profile."))
+            .font(.caption2).foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func recoveryKeyBox(_ key: String) -> some View {

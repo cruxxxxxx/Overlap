@@ -2,8 +2,9 @@ import AppKit
 import Combine
 import Foundation
 
-/// Drives the Explore page: draws batches from the search plugin's index, feeds
-/// likes and viewing into the taste profile, keeps the small state file.
+/// Drives the Explore page: draws batches from the search plugin's index into
+/// one endless feed, feeds likes and viewing into the taste profile, keeps the
+/// small state file.
 @MainActor
 final class ExploreModel: ObservableObject {
     enum Status { case ok, noPlugin, noIndex, exhausted, noMatches }
@@ -19,7 +20,10 @@ final class ExploreModel: ObservableObject {
     @Published private(set) var loading = false
     @Published private(set) var status = Status.ok
     @Published private(set) var batches: [[URL]] = []
-    @Published private(set) var batchIndex = 0
+    /// Changes when the feed starts over, so the grid gets a fresh scroll view.
+    @Published private(set) var feedID = UUID()
+    /// Nothing new came back: scrolling to the end stops asking for more.
+    private var feedEnded = false
     @Published private(set) var showingLiked = false
     @Published private(set) var focusedTaste: UUID?
     @Published private(set) var lastLess: LessUndo?
@@ -32,8 +36,7 @@ final class ExploreModel: ObservableObject {
     struct LessUndo {
         let eventIDs: [UUID]
         let urls: [URL]
-        let batchIndex: Int
-        let batchBefore: [URL]
+        let batchesBefore: [[URL]]
     }
 
     private struct SavedState: Codable {
@@ -50,10 +53,35 @@ final class ExploreModel: ObservableObject {
     private var dwellTask: Task<Void, Never>?
     private var scope: URL?
     private var filterSignature: String?
+    /// Exploring the hidden files: the state below is theirs, and lives in the vault.
+    @Published private(set) var inVault = false
+    /// A change made while Reclaim Space copied the vault, written after.
+    private var pendingSave = false
 
-    private static var fileURL: URL? {
+    private var fileURL: URL? {
+        inVault ? VaultDisk.exploreProfileURL : Self.libraryFileURL
+    }
+
+    private static var libraryFileURL: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("Overlap/explore-profile.json")
+    }
+
+    /// Drop `paths` from the library profile on disk, for when it isn't the one
+    /// in memory: a file hidden while exploring Hidden must still leave it.
+    private static func pruneLibraryProfile(dropping paths: Set<String>) {
+        guard !paths.isEmpty, let url = libraryFileURL, let data = try? Data(contentsOf: url),
+              var state = try? JSONDecoder().decode(SavedState.self, from: data) else {
+            return
+        }
+        let before = (state.events.count, state.seen.count)
+        state.events.removeAll { paths.contains($0.path) }
+        state.seen.removeAll { paths.contains($0) }
+        guard (state.events.count, state.seen.count) != before,
+              let out = try? JSONEncoder().encode(state) else {
+            return
+        }
+        try? out.write(to: url, options: .atomic)
     }
 
     func attach(to store: TagStore) {
@@ -64,6 +92,40 @@ final class ExploreModel: ObservableObject {
         load()
         store.onPrivacyChange = { [weak self] in
             self?.dropWithheldFiles()
+            if self?.pendingSave == true {
+                self?.save()
+            }
+        }
+        store.onExploreContextChange = { [weak self] on in
+            self?.switchContext(toVault: on)
+        }
+    }
+
+    /// Library and hidden Explore never share a profile, a seen list or a batch.
+    /// Nothing is saved on the way out: every change was saved when it happened,
+    /// and on a lock the vault may already be closing.
+    private func switchContext(toVault on: Bool) {
+        guard on != inVault else {
+            return
+        }
+        inVault = on
+        pendingSave = false
+        drawToken = UUID()
+        dwellTask?.cancel()
+        model = nil
+        events = []
+        seen = []
+        vectors = [:]
+        clearFeed()
+        focusedTaste = nil
+        lastLess = nil
+        showingLiked = false
+        loading = false
+        status = .ok
+        load()
+        refold()
+        if store?.mode == .explore {
+            enter()
         }
     }
 
@@ -73,9 +135,7 @@ final class ExploreModel: ObservableObject {
         events.filter { $0.signal == .like }.reversed()
     }
 
-    var currentBatch: [URL] {
-        batches.indices.contains(batchIndex) ? batches[batchIndex] : []
-    }
+    var feed: [URL] { batches.flatMap { $0 } }
 
     var isColdStart: Bool { profile.tastes.isEmpty }
 
@@ -84,39 +144,43 @@ final class ExploreModel: ObservableObject {
         dropWithheldFiles()
         if let store, scope != store.scopeURL {
             scope = store.scopeURL
-            batches = []
-            batchIndex = 0
+            clearFeed()
         }
         let filterMoved = filterSignature != nil && filterSignature != store?.exploreFilterSignature
         filterSignature = store?.exploreFilterSignature
         if showingLiked {
             showLiked()
-        } else if currentBatch.isEmpty || filterMoved || status == .noMatches || status == .exhausted {
-            draw()
+        } else if batches.isEmpty || filterMoved || status == .noMatches || status == .exhausted {
+            draw(fresh: true)
         } else {
-            store?.showExplore(currentBatch)
+            store?.showExplore(feed)
         }
     }
 
-    /// The tags changed: the next batch follows them right away. What's behind
-    /// stays reachable with Back.
+    /// The tags changed: the feed starts over on them right away.
     func filterChanged() {
         guard let store, filterSignature != store.exploreFilterSignature else {
             return
         }
         filterSignature = store.exploreFilterSignature
         showingLiked = false
-        draw()
+        draw(fresh: true)
     }
 
+    /// Append a batch and jump to its first image.
     func next() {
-        showingLiked = false
-        if batchIndex + 1 < batches.count {
-            batchIndex += 1
-            show(currentBatch)
-        } else {
-            draw()
+        if showingLiked {
+            leaveLiked()
         }
+        draw(jump: true)
+    }
+
+    /// The grid scrolled to the end: append a batch, leaving the selection be.
+    func loadMore() {
+        guard !showingLiked, !loading, !feedEnded, !batches.isEmpty else {
+            return
+        }
+        draw()
     }
 
     /// Step to the next image; past the last one, on to the next batch.
@@ -131,15 +195,6 @@ final class ExploreModel: ObservableObject {
         }
     }
 
-    func back() {
-        showingLiked = false
-        guard batchIndex > 0 else {
-            return
-        }
-        batchIndex -= 1
-        show(currentBatch)
-    }
-
     func showLiked() {
         showingLiked = true
         store?.showExplore(likedEvents.map { URL(fileURLWithPath: $0.path) })
@@ -147,20 +202,23 @@ final class ExploreModel: ObservableObject {
 
     func leaveLiked() {
         showingLiked = false
-        show(currentBatch)
+        store?.showExplore(feed)
+        select(at: 0)
     }
 
-    /// The next batch comes only from this taste; again to go back to all.
+    /// Batches from here on come only from this taste; again to go back to all.
     func focus(on taste: UUID) {
         focusedTaste = focusedTaste == taste ? nil : taste
-        showingLiked = false
-        batchIndex = max(0, batches.count - 1)
-        draw()
+        if showingLiked {
+            leaveLiked()
+        }
+        draw(jump: true)
     }
 
-    private func show(_ urls: [URL]) {
-        store?.showExplore(urls)
-        select(at: 0)
+    private func clearFeed() {
+        batches = []
+        feedID = UUID()
+        feedEnded = false
     }
 
     /// Keep a selection so the keys always have an image to act on.
@@ -176,7 +234,8 @@ final class ExploreModel: ObservableObject {
 
     // MARK: Drawing
 
-    private func draw(afterRecycling recycled: Bool = false) {
+    /// `fresh` starts the feed over, `jump` selects the new batch's first image.
+    private func draw(fresh: Bool = false, jump: Bool = false, afterRecycling recycled: Bool = false) {
         guard let store else {
             return
         }
@@ -191,17 +250,25 @@ final class ExploreModel: ObservableObject {
         if within.isEmpty {
             drawToken = UUID()
             loading = false
-            status = filtered ? .noMatches : .exhausted
-            store.showExplore([])
+            if fresh || batches.isEmpty {
+                clearFeed()
+                status = filtered ? .noMatches : .exhausted
+                store.showExplore([])
+            } else {
+                feedEnded = true
+            }
             return
         }
         loading = true
-        let tastes = focusedTaste.flatMap { id in profile.tastes.first { $0.id == id } }.map { [$0] } ?? profile.tastes
-        let excluded = Array(Set(recycled ? [] : seen).union(events.filter { $0.signal == .like || $0.signal == .lessLikeThis }.map(\.path)))
+        let tastes = focusedTaste.flatMap { id in profile.tastes.first { $0.id == id } }.map { [$0] } ?? profile.drawnTastes
+        // What's already in the feed never repeats in it, even on a recycle.
+        let inFeed = fresh ? [] : feed.map(\.path)
+        let excluded = Array(Set(recycled ? [] : seen).union(inFeed)
+            .union(events.filter { $0.signal == .like || $0.signal == .lessLikeThis }.map(\.path)))
         // Over-ask: hidden files can't be named to the plugin, so they're
         // dropped from what comes back.
         let query = ExploreQuery(tastes: tastes.map { TasteProfile.data($0.vector) },
-                                 avoid: profile.avoids.map { TasteProfile.data($0.vector) },
+                                 avoid: profile.drawnAvoids.map { TasteProfile.data($0.vector) },
                                  exclude: excluded, roots: store.exploreRoots,
                                  perTaste: Self.candidatesPerTaste,
                                  random: Self.batchSize * 3,
@@ -213,11 +280,12 @@ final class ExploreModel: ObservableObject {
                 return
             }
             self.loading = false
-            self.receive(outcome, weights: weights, recycled: recycled, filtered: filtered)
+            self.receive(outcome, weights: weights, fresh: fresh, jump: jump, recycled: recycled, filtered: filtered)
         }
     }
 
-    private func receive(_ outcome: SearchEngine.ExploreOutcome, weights: [Float], recycled: Bool, filtered: Bool) {
+    private func receive(_ outcome: SearchEngine.ExploreOutcome, weights: [Float], fresh: Bool, jump: Bool,
+                         recycled: Bool, filtered: Bool) {
         guard let store else {
             return
         }
@@ -230,11 +298,11 @@ final class ExploreModel: ObservableObject {
             return
         }
         adopt(model: result.model)
-        let urls = Array(Set(result.candidates.map(\.path))).map { URL(fileURLWithPath: $0) }
-        let allowed = Set(store.shareableForSource(urls).allowed.map(\.path))
+        let allowed = store.exploreAllows(Array(Set(result.candidates.map(\.path))))
         let fm = FileManager.default
+        let inFeed = fresh ? [] : Set(feed.map(\.path))
         let candidates = result.candidates.compactMap { wire -> ExploreBatch.Candidate? in
-            guard allowed.contains(wire.path), fm.fileExists(atPath: wire.path) else {
+            guard allowed.contains(wire.path), !inFeed.contains(wire.path), fm.fileExists(atPath: wire.path) else {
                 return nil
             }
             return ExploreBatch.Candidate(path: wire.path, score: Float(wire.score), taste: wire.taste,
@@ -250,10 +318,14 @@ final class ExploreModel: ObservableObject {
                 if !filtered {
                     seen = []
                 }
-                draw(afterRecycling: true)
-            } else {
+                draw(fresh: fresh, jump: jump, afterRecycling: true)
+            } else if fresh || batches.isEmpty {
+                clearFeed()
                 status = filtered ? .noMatches : .exhausted
                 store.showExplore([])
+            } else {
+                // Everything is already in the feed: it ends here.
+                feedEnded = true
             }
             return
         }
@@ -262,20 +334,22 @@ final class ExploreModel: ObservableObject {
             vectors[candidate.path] = candidate.vector
         }
         let batch = paths.map { URL(fileURLWithPath: $0) }
-        if !currentBatch.isEmpty {
-            batchIndex = batches.count
+        if fresh {
+            clearFeed()
         }
-        if batchIndex < batches.count {
-            batches[batchIndex] = batch
-        } else {
-            batches.append(batch)
-        }
+        batches.append(batch)
         seen.append(contentsOf: paths)
         if seen.count > Self.maxSeen {
             seen.removeFirst(seen.count - Self.maxSeen)
         }
         save()
-        show(batch)
+        guard !showingLiked else {
+            return
+        }
+        store.showExplore(feed)
+        if fresh || jump, let first = store.results.firstIndex(where: { batch.map(\.path).contains($0.id) }) {
+            select(at: first)
+        }
     }
 
     /// Vectors from another encoder don't compare, so a variant switch starts over.
@@ -317,17 +391,17 @@ final class ExploreModel: ObservableObject {
         guard !urls.isEmpty, let store else {
             return
         }
-        let batchBefore = currentBatch
+        let batchesBefore = batches
         let paths = Set(urls.map(\.path))
         let position = store.results.firstIndex { paths.contains($0.id) }
         events.removeAll { $0.signal == .like && paths.contains($0.path) }
         let recorded = urls.compactMap { record(.lessLikeThis, $0) }
-        if batches.indices.contains(batchIndex) {
-            batches[batchIndex].removeAll { paths.contains($0.path) }
+        for i in batches.indices {
+            batches[i].removeAll { paths.contains($0.path) }
         }
-        lastLess = LessUndo(eventIDs: recorded, urls: urls, batchIndex: batchIndex, batchBefore: batchBefore)
+        lastLess = LessUndo(eventIDs: recorded, urls: urls, batchesBefore: batchesBefore)
         changed()
-        store.showExplore(showingLiked ? likedEvents.map { URL(fileURLWithPath: $0.path) } : currentBatch)
+        store.showExplore(showingLiked ? likedEvents.map { URL(fileURLWithPath: $0.path) } : feed)
         if let position {
             select(at: position)
         }
@@ -338,13 +412,11 @@ final class ExploreModel: ObservableObject {
             return
         }
         events.removeAll { undo.eventIDs.contains($0.id) }
-        if batches.indices.contains(undo.batchIndex) {
-            batches[undo.batchIndex] = undo.batchBefore
-        }
+        batches = undo.batchesBefore
         lastLess = nil
         changed()
         if !showingLiked {
-            store?.showExplore(currentBatch)
+            store?.showExplore(feed)
         }
     }
 
@@ -407,10 +479,9 @@ final class ExploreModel: ObservableObject {
         focusedTaste = nil
         lastLess = nil
         showingLiked = false
-        batches = []
-        batchIndex = 0
+        clearFeed()
         changed()
-        draw()
+        draw(fresh: true)
     }
 
     private func changed() {
@@ -434,7 +505,15 @@ final class ExploreModel: ObservableObject {
         guard let store else {
             return
         }
-        let withheld = store.pathsWithheldFromPlugins()
+        let withheld: Set<String>
+        if inVault {
+            Self.pruneLibraryProfile(dropping: store.pathsWithheldFromPlugins())
+            // Unhidden files left the vault: their vault paths are gone.
+            let present = store.vaultPaths
+            withheld = Set(events.map(\.path) + seen).subtracting(present)
+        } else {
+            withheld = store.pathsWithheldFromPlugins()
+        }
         guard !withheld.isEmpty else {
             return
         }
@@ -455,7 +534,7 @@ final class ExploreModel: ObservableObject {
     // MARK: Persistence
 
     private func load() {
-        guard let url = Self.fileURL, let data = try? Data(contentsOf: url),
+        guard let url = fileURL, let data = try? Data(contentsOf: url),
               let state = try? JSONDecoder().decode(SavedState.self, from: data) else {
             return
         }
@@ -466,9 +545,18 @@ final class ExploreModel: ObservableObject {
     }
 
     private func save() {
-        guard let url = Self.fileURL else {
+        guard let url = fileURL else {
             return
         }
+        // The hidden profile is written only into the open vault.
+        if inVault && (store?.exploreInVault != true || !VaultDisk.isAttached) {
+            return
+        }
+        if inVault && store?.vaultRebuilding == true {
+            pendingSave = true
+            return
+        }
+        pendingSave = false
         let state = SavedState(model: model, events: events, seen: seen)
         if let data = try? JSONEncoder().encode(state) {
             try? data.write(to: url, options: .atomic)

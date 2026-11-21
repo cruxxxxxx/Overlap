@@ -30,6 +30,10 @@ struct MoodBoard: Identifiable, Codable {
     var palette: [PaletteSwatch]?
     /// Notes, labels and boxes. Optional so older boards still decode.
     var elements: [BoardElement]?
+    /// Made from hidden files' results (a Find Similar from a hidden image,
+    /// hidden Explore): kept whole in the encrypted part, like a board whose
+    /// source query names a hidden tag.
+    var privateBoard: Bool?
 
     var maxZ: Int { items.map(\.z).max() ?? 0 }
 
@@ -88,6 +92,10 @@ final class BoardStore: ObservableObject {
 
     private weak var tags: TagStore?
     private var revealSubscription: AnyCancellable?
+    private var seedsObserver: NSObjectProtocol?
+    /// Seed moves seen while locked, applied on reveal: a board turning fully
+    /// private can only be written whole once its private part is loaded.
+    private var pendingSeedMoves: [String: String] = [:]
     private var dirty: Set<UUID> = []
     private var saveTask: Task<Void, Never>?
     /// Each board's own undo history. Owned here, not taken from SwiftUI's
@@ -111,6 +119,13 @@ final class BoardStore: ObservableObject {
         if store.revealed {
             loadPrivate()
         }
+        seedsObserver = NotificationCenter.default.addObserver(forName: .vaultSeedsMoved, object: store,
+                                                               queue: .main) { [weak self] note in
+            guard let moves = note.userInfo?["moves"] as? [String: String] else { return }
+            MainActor.assumeIsolated {
+                self?.remapSourceSeeds(moves)
+            }
+        }
         revealSubscription = store.$revealed.removeDuplicates().sink { [weak self] revealed in
             // @Published fires before the value lands: on lock the vault is
             // still attached here, so private tiles can still be told apart.
@@ -120,12 +135,34 @@ final class BoardStore: ObservableObject {
             if revealed {
                 DispatchQueue.main.async {
                     self.loadPrivate()
+                    if !self.pendingSeedMoves.isEmpty {
+                        let moves = self.pendingSeedMoves
+                        self.pendingSeedMoves = [:]
+                        self.remapSourceSeeds(moves)
+                    }
                     self.saveAll()   // re-split: files may have become hidden
                 }
             } else {
                 self.saveAll()
                 self.dropPrivate()
                 self.clearUndoHistory()
+            }
+        }
+    }
+
+    /// A board's source query follows its "like X" seeds into the vault, so
+    /// the board turns private with X (see `TagStore.remapSeeds`).
+    private func remapSourceSeeds(_ moves: [String: String]) {
+        guard tags?.revealed == true else {
+            pendingSeedMoves.merge(moves) { _, new in new }
+            return
+        }
+        for i in boards.indices {
+            guard let source = boards[i].source else { continue }
+            let remapped = source.remappingSeeds(moves)
+            if remapped.allTags != source.allTags {
+                boards[i].source = remapped
+                scheduleSave(boards[i].id)
             }
         }
     }
@@ -198,8 +235,9 @@ final class BoardStore: ObservableObject {
         replace(board, undo: undo, actionName: actionName)
     }
 
-    func createBoard(name: String, source: SavedQuery?, items: [BoardItem]) -> UUID {
-        let board = MoodBoard(name: name, source: source, items: items)
+    func createBoard(name: String, source: SavedQuery?, items: [BoardItem], privateBoard: Bool = false) -> UUID {
+        var board = MoodBoard(name: name, source: source, items: items)
+        board.privateBoard = privateBoard ? true : nil
         boards.append(board)
         scheduleSave(board.id)
         return board.id
@@ -230,11 +268,27 @@ final class BoardStore: ObservableObject {
             return
         }
         let onBoard = Set(existing.items.map(\.path))
-        let fresh = paths.filter { !onBoard.contains($0) }
+        var fresh = paths.filter { !onBoard.contains($0) }
         guard !fresh.isEmpty else {
             return
         }
-        let aspects = await BoardLayout.aspectRatios(fresh)
+        // Known only while revealed: after a lock, hidden files can't be told apart.
+        let epoch = tags?.lockEpoch
+        let hidden = tags?.privatePaths(among: fresh) ?? []
+        var aspects = await BoardLayout.aspectRatios(fresh)
+        if let tags, tags.lockEpoch != epoch {
+            // Locked while reading sizes: the private part was already dropped,
+            // and a save now would write hidden tiles into the public file.
+            guard let current = board(id), !isFullyPrivate(current, tags) else {
+                return
+            }
+            let keep = fresh.indices.filter { !hidden.contains(fresh[$0]) }
+            fresh = keep.map { fresh[$0] }
+            aspects = keep.map { aspects[$0] }
+            guard !fresh.isEmpty else {
+                return
+            }
+        }
         mutate(id, undo: undo, actionName: "Add to Board") { board in
             let origin: CGPoint
             if let point {
@@ -314,7 +368,7 @@ final class BoardStore: ObservableObject {
         }
         let fm = FileManager.default
         try? fm.createDirectory(at: Self.boardsDir, withIntermediateDirectories: true)
-        let fullyPrivate = board.source.map { tags.isPrivateQuery($0) } ?? false
+        let fullyPrivate = isFullyPrivate(board, tags)
         // While locked, memory holds only what was public at lock time; never
         // re-split then, or a tile that turned private would be lost.
         let hidden = tags.revealed
@@ -396,13 +450,17 @@ final class BoardStore: ObservableObject {
         boards.sort { $0.created < $1.created }
     }
 
+    private func isFullyPrivate(_ board: MoodBoard, _ tags: TagStore) -> Bool {
+        board.privateBoard == true || (board.source.map { tags.isPrivateQuery($0) } ?? false)
+    }
+
     /// On lock: forget everything private. Fully private boards disappear
     /// (their windows show "unavailable"); others lose their hidden tiles.
     private func dropPrivate() {
         guard let tags else {
             return
         }
-        boards.removeAll { $0.source.map { tags.isPrivateQuery($0) } ?? false }
+        boards.removeAll { isFullyPrivate($0, tags) }
         for i in boards.indices {
             let hidden = tags.privatePaths(among: boards[i].items.map(\.path) + Array(boards[i].dismissed))
             boards[i].items.removeAll { hidden.contains($0.path) }
@@ -465,9 +523,10 @@ extension BoardStore {
         let query = source ?? (store.mode == .queue || store.mode == .explore
             ? nil
             : store.currentQuerySnapshot(name: description, includeTypes: true))
-        let isPrivate = query.map { store.isPrivateQuery($0) } ?? false
+        let fromHidden = store.resultsFromHiddenSource
+        let isPrivate = fromHidden || (query.map { store.isPrivateQuery($0) } ?? false)
         let boardName = name ?? (isPrivate ? "Private Board" : description)
-        let id = createBoard(name: boardName, source: query, items: [])
+        let id = createBoard(name: boardName, source: query, items: [], privateBoard: fromHidden)
         await addFiles(paths, to: id, undo: nil)
         return id
     }

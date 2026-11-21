@@ -2,7 +2,9 @@ import Foundation
 import Accelerate
 
 /// The on-device taste profile behind the Explore page: several EMA centroids,
-/// so distinct interests stay distinct instead of averaging into mush.
+/// so distinct interests stay distinct instead of averaging into mush. Every
+/// taste is tracked; only the strongest few are drawn from. Forcing them under
+/// a cap by merging the closest pair glued unrelated interests into one blob.
 ///
 /// The profile is a pure fold over a short log of events. Nothing else is
 /// stored, so unliking, forgetting a taste, or a file becoming hidden just
@@ -47,14 +49,18 @@ struct TasteCentroid: Identifiable {
 }
 
 struct TasteProfile {
+    /// How many tastes (and avoids) a batch is drawn from; the rest wait their turn.
     static let maxTastes = 6
     static let maxAvoids = 3
     static let joinCosine: Float = 0.55
     static let minimumAlpha: Float = 0.12
     static let halfLifeDays: Double = 45
 
-    var tastes: [TasteCentroid] = []
-    var avoids: [TasteCentroid] = []
+    var tastes: [TasteCentroid] = []   // strongest first
+    var avoids: [TasteCentroid] = []   // strongest first
+
+    var drawnTastes: [TasteCentroid] { Array(tastes.prefix(Self.maxTastes)) }
+    var drawnAvoids: [TasteCentroid] { Array(avoids.prefix(Self.maxAvoids)) }
 
     static func vector(_ data: Data) -> [Float] {
         data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
@@ -86,20 +92,20 @@ struct TasteProfile {
         for event in events {
             let vector = Self.vector(event.vector)
             if event.signal == .lessLikeThis {
-                absorb(event, vector, into: &profile.avoids, limit: maxAvoids)
+                absorb(event, vector, into: &profile.avoids)
             } else {
-                absorb(event, vector, into: &profile.tastes, limit: maxTastes)
+                absorb(event, vector, into: &profile.tastes)
             }
         }
         for i in profile.tastes.indices {
             decay(&profile.tastes[i], to: now)
         }
         profile.tastes.sort { $0.weight > $1.weight }
+        profile.avoids.sort { $0.weight > $1.weight }
         return profile
     }
 
-    private static func absorb(_ event: TasteEvent, _ vector: [Float],
-                               into centroids: inout [TasteCentroid], limit: Int) {
+    private static func absorb(_ event: TasteEvent, _ vector: [Float], into centroids: inout [TasteCentroid]) {
         let nearest = centroids.indices.max {
             cosine(centroids[$0].vector, vector) < cosine(centroids[$1].vector, vector)
         }
@@ -114,9 +120,6 @@ struct TasteProfile {
                                        mass: event.signal.strength, lastDate: event.date,
                                        eventIDs: [event.id], exemplar: event.path,
                                        exemplarIsLike: event.signal == .like))
-        if centroids.count > limit {
-            mergeClosestPair(&centroids)
-        }
     }
 
     /// EMA step. Early on alpha follows a running mean, so a new taste settles
@@ -142,33 +145,6 @@ struct TasteProfile {
         }
         centroid.weight *= Float(pow(0.5, days / halfLifeDays))
         centroid.lastDate = date
-    }
-
-    private static func mergeClosestPair(_ centroids: inout [TasteCentroid]) {
-        var pair = (0, 1)
-        var best: Float = -2
-        for i in centroids.indices {
-            for j in centroids.indices where j > i {
-                let score = cosine(centroids[i].vector, centroids[j].vector)
-                if score > best {
-                    best = score
-                    pair = (i, j)
-                }
-            }
-        }
-        let other = centroids.remove(at: pair.1)
-        var kept = centroids[pair.0]
-        let share = other.weight / max(kept.weight + other.weight, .leastNonzeroMagnitude)
-        kept.vector = normalized(zip(kept.vector, other.vector).map { (1 - share) * $0 + share * $1 })
-        kept.eventIDs.formUnion(other.eventIDs)
-        kept.mass += other.mass
-        if other.weight > kept.weight {
-            kept.exemplar = other.exemplar
-            kept.exemplarIsLike = other.exemplarIsLike
-        }
-        kept.weight += other.weight
-        kept.lastDate = max(kept.lastDate, other.lastDate)
-        centroids[pair.0] = kept
     }
 }
 

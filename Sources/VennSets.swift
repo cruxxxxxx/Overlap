@@ -63,6 +63,24 @@ enum QuerySet: Hashable {
         return false
     }
 
+    /// The images a "like these" circle is seeded with; empty for the rest.
+    var similarPaths: [String] {
+        if case .similar(let paths) = self {
+            return paths
+        }
+        return []
+    }
+
+    /// A "like these" circle's raw form with moved seeds following their files;
+    /// any other set unchanged.
+    static func remapSeeds(_ raw: String, _ moves: [String: String]) -> String {
+        let paths = QuerySet(raw).similarPaths
+        guard paths.contains(where: { moves[$0] != nil }) else {
+            return raw
+        }
+        return QuerySet.similar(paths.map { moves[$0] ?? $0 }).raw
+    }
+
     /// Membership comes from a plugin run, not from the file itself.
     var needsPlugin: Bool {
         switch self {
@@ -88,6 +106,10 @@ enum QuerySet: Hashable {
             return "“\(text)”"
         case .similar(let paths):
             if paths.count == 1, let path = paths.first {
+                // Names export folders and boards: a hidden image's name stays out.
+                if VaultDisk.contains(path) {
+                    return "Like a hidden image"
+                }
                 return "Like \(URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent)"
             }
             return "Like \(paths.count) images"
@@ -137,4 +159,23 @@ extension FileItem {
     var year: Int? {
         (createdDate ?? modDate).map { Calendar.current.component(.year, from: $0) }
     }
+}
+
+extension SavedQuery {
+    /// The query with its "like these" seeds following files that moved.
+    func remappingSeeds(_ moves: [String: String]) -> SavedQuery {
+        var out = self
+        out.groups = groups.map { group in
+            var g = group
+            g.sets = group.sets.map { QuerySet.remapSeeds($0, moves) }
+            return g
+        }
+        out.excludes = excludes.map { QuerySet.remapSeeds($0, moves) }
+        return out
+    }
+}
+
+extension Notification.Name {
+    /// Files moved into or out of the vault; userInfo["moves"] maps old → new path.
+    static let vaultSeedsMoved = Notification.Name("overlap.vaultSeedsMoved")
 }

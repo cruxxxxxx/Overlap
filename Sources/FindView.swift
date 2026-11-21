@@ -69,6 +69,7 @@ struct FindView: View {
             }
         }
         .onChange(of: allSets) { _ in browse = [] }   // reset drill when the query changes
+        .onChange(of: store.activeGroupID) { _ in browse = [] }   // each diagram starts at the top
         .sheet(item: Binding(
             get: { expandedGroupID.flatMap { id in store.groups.first { $0.id == id } } },
             set: { expandedGroupID = $0?.id })) { group in
@@ -171,7 +172,7 @@ struct FindView: View {
     /// "+" on a diagram: circles that aren't tags.
     private func addCircleMenu(_ group: VennGroup) -> some View {
         let choices = store.circleChoices
-        let images = store.shareableForSource(store.selectedURLs()).allowed.filter { FileKind.of(contentType: nil, ext: $0.pathExtension) == .image }
+        let images = store.similarSources(store.selectedURLs()).filter { FileKind.of(contentType: nil, ext: $0.pathExtension) == .image }
         return Menu {
             if store.searchAvailable {
                 Button("Semantic Search…") {

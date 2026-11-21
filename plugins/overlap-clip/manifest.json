@@ -3,6 +3,7 @@
   "id": "com.overlap.clip",
   "version": "0.1.0",
   "protocolVersion": 1,
+  "local": true,
   "exec": "overlap-clip",
   "handles": ["image"],
   "capabilities": ["search", "similar", "duplicates", "explore"],

@@ -132,22 +132,63 @@ struct Config: Codable {
 
 // MARK: - Paths
 
-let cacheRoot: URL = {
-    if let override = ProcessInfo.processInfo.environment["OVERLAP_PLUGIN_CACHE"] {
-        return URL(fileURLWithPath: override, isDirectory: true)
+let environment = ProcessInfo.processInfo.environment
+let defaultCacheRoot = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    .appendingPathComponent("Overlap/PluginCache", isDirectory: true)
+/// What this plugin learns about files. The host points hidden files at a root
+/// inside its encrypted vault and sets STRICT: then a missing root means the
+/// vault closed, and recreating it would put an index on the host disk.
+let strictCache = environment["OVERLAP_PLUGIN_CACHE_STRICT"] == "1"
+
+func deviceID(_ path: String) -> dev_t? {
+    var info = stat()
+    return stat(path, &info) == 0 ? info.st_dev : nil
+}
+
+/// Under STRICT the root must sit on the mounted vault: `_VOLUME` is a mount
+/// point (a different device than its parent) and the root is on it.
+func onMountedVolume(_ root: URL) -> Bool {
+    guard let volume = environment["OVERLAP_PLUGIN_CACHE_VOLUME"],
+          let own = deviceID(volume),
+          let parent = deviceID((volume as NSString).deletingLastPathComponent) else {
+        return false
     }
-    return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Overlap/PluginCache", isDirectory: true)
+    return own != parent && deviceID(root.path) == own
+}
+
+let cacheRoot: URL = {
+    guard let override = environment["OVERLAP_PLUGIN_CACHE"] else {
+        if strictCache {   // STRICT names a vault root; without one, don't guess
+            FileHandle.standardError.write(Data("overlap-clip: STRICT without a cache root; not running\n".utf8))
+            exit(2)
+        }
+        return defaultCacheRoot
+    }
+    let root = URL(fileURLWithPath: override, isDirectory: true)
+    if strictCache && !onMountedVolume(root) {
+        FileHandle.standardError.write(Data("overlap-clip: cache root is not on the vault; not running\n".utf8))
+        exit(2)
+    }
+    return root
 }()
+/// Under STRICT only this folder may be created, never a parent: if the
+/// vault closes mid-run, writes fail instead of landing on the host disk.
 let cacheDir: URL = {
     let d = cacheRoot.appendingPathComponent("overlap-clip", isDirectory: true)
+    try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: !strictCache)
+    return d
+}()
+/// Config and downloaded models: nothing about files, shared by every partition.
+let sharedDir: URL = {
+    let root = environment["OVERLAP_PLUGIN_SHARED_CACHE"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? cacheRoot
+    let d = root.appendingPathComponent("overlap-clip", isDirectory: true)
     try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
     return d
 }()
-let modelsDir = cacheDir.appendingPathComponent("models", isDirectory: true)
+let modelsDir = sharedDir.appendingPathComponent("models", isDirectory: true)
 let metaURL = cacheDir.appendingPathComponent("meta.json")
 let binURL = cacheDir.appendingPathComponent("clip.bin")
-let configURL = cacheDir.appendingPathComponent("config.json")
+let configURL = sharedDir.appendingPathComponent("config.json")
 let lockURL = cacheDir.appendingPathComponent("lock")
 
 /// Where clip-vocab.json / clip-merges.txt live: next to the executable (the
@@ -252,6 +293,16 @@ final class Downloader: NSObject, URLSessionDownloadDelegate {
 /// Make sure both compiled encoders exist for the configured variant. Downloads
 /// + compiles on first use. Returns nil on success, else a human-readable reason.
 func ensureModels(_ spec: ModelSpec) -> String? {
+    // Both partitions' processes may start at once and share models/: one
+    // downloads, the other waits and then finds them ready.
+    try? FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+    let fd = open(sharedDir.appendingPathComponent("models.lock").path, O_CREAT | O_RDWR, 0o644)
+    if fd >= 0 { flock(fd, LOCK_EX) }
+    defer { if fd >= 0 { flock(fd, LOCK_UN); close(fd) } }
+    return ensureModelsLocked(spec)
+}
+
+private func ensureModelsLocked(_ spec: ModelSpec) -> String? {
     let fm = FileManager.default
     let version = (try? String(contentsOf: spec.versionURL, encoding: .utf8))?
         .trimmingCharacters(in: .whitespacesAndNewlines)

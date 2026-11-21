@@ -54,8 +54,11 @@ let refined = TasteProfile.fold(log + [event("a", .viewed, near(axis(0)))], now:
 check(refined.tastes.count == 2, "a glance joins an existing taste")
 
 let spread = (0..<10).map { event("s\($0)", .like, axis($0)) }
-check(TasteProfile.fold(spread, now: clock).tastes.count == TasteProfile.maxTastes, "taste count is capped")
-check(TasteProfile.fold(spread, now: clock).tastes.reduce(0) { $0 + $1.eventIDs.count } == 10, "merging keeps every event")
+let spreadProfile = TasteProfile.fold(spread, now: clock)
+check(spreadProfile.tastes.count == 10, "unrelated likes stay separate tastes, got \(spreadProfile.tastes.count)")
+check(spreadProfile.drawnTastes.count == TasteProfile.maxTastes, "batches draw from the strongest few")
+let leader = TasteProfile.fold(spread + (0..<3).map { event("s9-\($0)", .like, near(axis(9))) }, now: clock)
+check(leader.drawnTastes.first.map { TasteProfile.cosine($0.vector, axis(9)) > 0.8 } == true, "a taste liked more rises to the top")
 
 let less = TasteProfile.fold([event("x", .lessLikeThis, axis(3))], now: clock)
 check(less.tastes.isEmpty && less.avoids.count == 1, "less-like-this goes to avoids, not tastes")

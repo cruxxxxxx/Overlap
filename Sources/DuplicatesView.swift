@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// The Duplicates window's state: one scan at a time, run on demand.
 @MainActor
@@ -19,16 +20,59 @@ final class DuplicatesModel: ObservableObject {
     @Published private(set) var scanned = false
     /// The file chosen to keep, per group (defaults to the suggested one).
     @Published var keepers: [String: String] = [:]
-    private var notDuplicates = NotDuplicates.load()
+    private var notDuplicates: Set<String> = []
     private var token = UUID()
+    private var revealSubscription: AnyCancellable?
+
+    /// Bind to the store's lock state (idempotent; the window calls it on appear).
+    func attach(to store: TagStore) {
+        guard revealSubscription == nil else {
+            return
+        }
+        revealSubscription = store.$revealed.removeDuplicates().sink { [weak self, weak store] revealed in
+            guard let self else {
+                return
+            }
+            if revealed {
+                DispatchQueue.main.async {
+                    self.notDuplicates = NotDuplicates.load(includingHidden: store?.revealed == true)
+                }
+            } else {
+                self.dropHidden()
+            }
+        }
+    }
+
+    /// On lock: a scan in flight is void, and hidden files leave the window.
+    private func dropHidden() {
+        let hadHidden = groups.contains { $0.files.contains { VaultDisk.contains($0.id) } }
+        if scanning {
+            token = UUID()
+            scanning = false
+            progress = nil
+        }
+        groups.removeAll { group in group.files.contains { VaultDisk.contains($0.id) } }
+        keepers = keepers.filter { group, _ in groups.contains { $0.id == group } }
+        notDuplicates = notDuplicates.filter { !$0.components(separatedBy: "\n").contains(where: VaultDisk.contains) }
+        if hadHidden && groups.isEmpty {
+            scanned = false
+        }
+    }
 
     /// Cosine cutoff for the plugin: 0.98 strict … 0.90 loose.
     var threshold: Double { 0.98 - looseness * 0.08 }
 
     func scan(store: TagStore) {
+        // Fresh: files may have moved into or out of the vault since.
+        notDuplicates = NotDuplicates.load(includingHidden: store.revealed)
         let urls = store.duplicateCandidates(wholeLibrary: scope == .library)
         let near = includeNear && store.duplicatePluginsAvailable
-        let paths = scope == .library ? nil : urls.map(\.path)
+        let libraryPaths = scope == .library ? nil : urls.map(\.path).filter { !VaultDisk.contains($0) }
+        // Hidden images match only each other: their index is in the vault.
+        let hiddenPaths = urls.map(\.path).filter(VaultDisk.contains)
+        let vault = hiddenPaths.isEmpty ? nil : store.vaultPartition
+        let vaultScope: [String]? = scope == .library ? nil : hiddenPaths
+        let epoch = store.lockEpoch
         let threshold = threshold, excluded = notDuplicates
         let disabled = store.disabledPluginIDs, settings = store.pluginSettings
         let token = UUID()
@@ -46,12 +90,28 @@ final class DuplicatesModel: ObservableObject {
             var pairs = DuplicateFinder.exactPairs(urls, onProgress: report)
             if near {
                 report("Comparing images…")
-                pairs += DuplicateFinder.nearPairs(threshold: threshold, paths: paths, disabledIDs: disabled,
-                                                   pluginSettings: settings, onProgress: report)
+                if libraryPaths?.isEmpty != true {
+                    pairs += DuplicateFinder.nearPairs(threshold: threshold, paths: libraryPaths,
+                                                       disabledIDs: disabled, pluginSettings: settings,
+                                                       onProgress: report)
+                }
+                if let vault {
+                    pairs += DuplicateFinder.nearPairs(threshold: threshold, paths: vaultScope,
+                                                       disabledIDs: disabled, pluginSettings: settings,
+                                                       partition: vault, onProgress: report)
+                }
             }
             let groups = DuplicateFinder.groups(from: pairs, excluding: excluded)
             await MainActor.run {
                 guard let self, self.token == token else {
+                    return
+                }
+                // Locked meanwhile: nothing hidden may land in the window.
+                guard store.lockEpoch == epoch, store.revealed || !groups.contains(where: { group in
+                    group.files.contains { VaultDisk.contains($0.id) }
+                }) else {
+                    self.scanning = false
+                    self.progress = nil
                     return
                 }
                 self.groups = groups
@@ -80,8 +140,8 @@ final class DuplicatesModel: ObservableObject {
         }
     }
 
-    func markNotDuplicates(_ group: DuplicateGroup) {
-        NotDuplicates.add(group.files.map(\.id), to: &notDuplicates)
+    func markNotDuplicates(_ group: DuplicateGroup, store: TagStore) {
+        NotDuplicates.add(group.files.map(\.id), to: &notDuplicates, includingHidden: store.revealed)
         remove(group)
     }
 
@@ -103,6 +163,13 @@ struct DuplicatesView: View {
             content
         }
         .frame(minWidth: 640, minHeight: 420)
+        .onAppear { model.attach(to: store) }
+    }
+
+    /// Files "Keep Suggested in All" would remove, and how many are hidden.
+    private var removalCounts: (all: Int, hidden: Int) {
+        let others = model.groups.flatMap { $0.files.dropFirst() }
+        return (others.count, others.filter { VaultDisk.contains($0.id) }.count)
     }
 
     private var toolbar: some View {
@@ -144,8 +211,11 @@ struct DuplicatesView: View {
                 model.keepSuggestedInAll(store: store)
             }
         } message: {
-            Text("\(model.groups.reduce(0) { $0 + $1.files.count - 1 }) files move to the Trash. "
-                 + "Their tags are added to the file that's kept. Edit ▸ Undo in the main window reverses each group.")
+            let counts = removalCounts
+            Text("\(counts.all) files move to the Trash"
+                 + (counts.hidden > 0 ? " (\(counts.hidden) hidden, to the vault's own trash, emptied when you lock)" : "")
+                 + ". Their tags are added to the file that's kept, except hidden tags onto a file outside the vault."
+                 + " Edit ▸ Undo in the main window reverses each group.")
         }
     }
 
@@ -197,12 +267,14 @@ private struct DuplicateGroupRow: View {
                     .font(.headline)
                 Text(folderSummary).foregroundStyle(.secondary)
                 Spacer()
-                Button("Not Duplicates") { model.markNotDuplicates(group) }
+                Button("Not Duplicates") { model.markNotDuplicates(group, store: store) }
                     .help("Don't show these together again")
                 Button("Merge Tags Only") { model.keep(group, store: store, trashOthers: false) }
                     .help("Add every file's tags to the one marked Keep, and keep all files")
                 Button("Keep Selected") { model.keep(group, store: store, trashOthers: true) }
-                    .help("Move the others to the Trash after adding their tags to this one")
+                    .help(group.files.contains { VaultDisk.contains($0.id) }
+                          ? "Move the others to the Trash after adding their tags to this one (hidden tags only if it's hidden too). Hidden files go to the vault's trash, emptied when you lock."
+                          : "Move the others to the Trash after adding their tags to this one")
             }
             ScrollView(.horizontal) {
                 HStack(alignment: .top, spacing: 12) {
@@ -246,8 +318,14 @@ private struct DuplicateCard: View {
                 .stroke(isKeeper ? Color.accentColor : .clear, lineWidth: 2))
             Text(file.url.lastPathComponent).font(.caption).lineLimit(1).truncationMode(.middle)
             Text(details).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            Text(file.url.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
-                .font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.head)
+            HStack(spacing: 3) {
+                if isHidden {
+                    Image(systemName: "lock.fill").help("Hidden file, in the vault")
+                }
+                Text(folder.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                    .lineLimit(1).truncationMode(.head)
+            }
+            .font(.caption2).foregroundStyle(.tertiary)
             let tags = TagIO.tags(of: file.url)
             if !tags.isEmpty {
                 Text(tags.joined(separator: ", ")).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
@@ -256,13 +334,24 @@ private struct DuplicateCard: View {
         .frame(width: 170)
         .contentShape(Rectangle())
         .contextMenu {
-            Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([file.url]) }
+            Button("Reveal in Finder") {
+                if HiddenExposure.confirm([file.url], question: "Reveal %@ in Finder?", button: "Reveal") {
+                    NSWorkspace.shared.activateFileViewerSelecting([file.url])
+                }
+            }
             Button("Quick Look") { QuickLookOpener.open([file.url]) }
         }
         .help("Click to keep this one")
         .task(id: file.id) {
             thumbnail = await ThumbnailCache.shared.thumbnail(for: file.url, size: 340)
         }
+    }
+
+    private var isHidden: Bool { VaultDisk.contains(file.id) }
+
+    /// Where the file lives, or for a hidden one where it lived before hiding.
+    private var folder: String {
+        (VaultDisk.originalURL(forVault: file.url) ?? file.url).deletingLastPathComponent().path
     }
 
     private var details: String {

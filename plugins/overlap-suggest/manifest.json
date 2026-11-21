@@ -3,6 +3,7 @@
   "id": "com.overlap.suggest",
   "version": "0.2.0",
   "protocolVersion": 1,
+  "local": true,
   "exec": "overlap-suggest",
   "handles": ["image"],
   "batch": true,

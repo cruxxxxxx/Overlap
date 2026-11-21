@@ -378,7 +378,7 @@ struct TagRow: View {
         .buttonStyle(.plain)
         .padding(.vertical, 1)
         .background(dropTargeted ? Color.accentColor.opacity(0.25) : .clear)
-        .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted) { providers in
+        .onDrop(of: HiddenDrag.dropTypes, isTargeted: $dropTargeted) { providers in
             applyTagToDropped(providers)
             return true
         }
@@ -446,16 +446,8 @@ struct TagRow: View {
 
     private func applyTagToDropped(_ providers: [NSItemProvider]) {
         let tag = node.fullPath
-        var urls: [URL] = []
-        let group = DispatchGroup()
-        for p in providers {
-            group.enter()
-            _ = p.loadObject(ofClass: NSURL.self) { obj, _ in
-                if let u = obj as? URL { urls.append(u) }
-                group.leave()
-            }
-        }
-        group.notify(queue: .main) {
+        Task { @MainActor in
+            let urls = await HiddenDrag.urls(from: providers)
             guard !urls.isEmpty else { return }
             // If the dragged image is part of the current selection, tag the
             // whole selection (SwiftUI drag only carries the one grabbed item).
